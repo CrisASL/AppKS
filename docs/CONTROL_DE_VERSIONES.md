@@ -1,11 +1,11 @@
-# 📝 Bitácora de Desarrollo – AppKS  
+# � Control de Versiones – AppKS  
 
 ## 📌 Proyecto  
-**AppKS – Sistema de Gestión de Requisiciones**  
+**AppKS – Sistema de Gestión Operativa**  
 Desarrollado por: Cristian Salas  
 Inicio: Enero 2026  
 
-Sistema web desarrollado en Python (Streamlit + SQLite) que reemplaza planillas Excel para la gestión de requisiciones conectadas a cubos exportados desde Softland ERP.
+Sistema web desarrollado en Python (Streamlit + SQLite) que reemplaza planillas Excel para la gestión de requisiciones, compras, ventas e inventario, conectado a cubos exportados desde Softland ERP.
 
 ---
 
@@ -375,6 +375,37 @@ El `.exe` **debe estar en la raíz del proyecto** junto a `run.py` y `venv\`. No
 
 ---
 
+## 🔹 v1.6.0 – Módulo Análisis de Stock
+
+### 🎯 Objetivo
+Incorporar análisis cruzado de inventario y ventas para clasificar el estado de stock y la rotación de productos en KS Talca.
+
+### 🏗️ Implementado
+
+#### 1. Módulo `analisis_stock` (`app/modules/analisis_stock/`)
+- **`service.py`**: Lógica de negocio que cruza cubo de inventario con cubo de ventas histórico
+  - Estado de stock: `Falta de stock`, `Stock óptimo`, `Sobrestock` (referencia: 2 meses de ventas del mismo período del año anterior)
+  - Rotación: `Alta`, `Media`, `Baja` (según meses con venta > 0 en el año)
+- **`view.py`**: Vista Streamlit con métricas de resumen, filtros por estado y rotación, tabla ordenable
+
+#### 2. Servicio `ventas_inventario_service.py` (`app/services/`)
+- Persistencia de cubos de Ventas e Inventario en SQLite
+- Control de versión por hash MD5: evita reprocesar archivos sin cambios
+- Arquitectura consistente con `compras_service.py`
+
+#### 3. Soporte completo de cubos
+- Cubos de Ventas e Inventario integrados en carga, validación y session state
+- Indicadores de estado en sidebar para los 4 cubos
+- Nuevo ítem de menú: `📈 Análisis Stock`
+
+### 📈 Resultado
+✅ Clasificación automática de productos por estado de stock y rotación  
+✅ Referencia temporal correcta (mismo mes del año anterior)  
+✅ Persistencia consistente con el resto del sistema  
+✅ Menú de 5 opciones operativo  
+
+---
+
 ### 🎯 Objetivo
 Permitir que usuarios finales no técnicos abran AppKS con doble clic, sin Python, VS Code ni entorno virtual.
 
@@ -405,22 +436,80 @@ Permitir que usuarios finales no técnicos abran AppKS con doble clic, sin Pytho
 
 ---
 
+## 🔹 v1.6.1 – Correcciones de Algoritmo y Caché
+
+### 🎯 Objetivo
+Corregir el algoritmo de sincronización REQ→OC e implementar una invalidación de caché completa al eliminar cubos.
+
+### 🐛 Problemas Corregidos
+
+#### 1. Algoritmo REQ→OC con Validación Temporal Incorrecta
+
+**Problema**:
+- Las OCs se asignaban a requisiciones más nuevas, ignorando la restricción `fecha_oc >= fecha_req`
+- `sort_values('fecha_oc_dt')` no garantizaba mínima diferencia temporal
+
+**Solución**:
+- `dropna()` explícito en ambos DataFrames antes de filtrar
+- Columna `diff` en días: `(fecha_oc_dt - fecha_req).dt.days`
+- `sort_values('diff')`: la OC más cercana (mínima diferencia) se asigna primero
+- Ventana de búsqueda: `0 ≤ diff ≤ 90` días
+- `print()` de diagnóstico para verificación manual
+
+#### 2. Limpieza de Cubos No Eliminaba Tablas Raw ni Hashes
+
+**Problema**:
+- `limpiar_cubo_requisiciones()` y `limpiar_cubo_compras()` solo eliminaban tablas operacionales
+- Las tablas `*_raw` y los hashes en `configuracion` persistían
+- Al recargar la app, `inicializar_session_state()` repoblaba session_state con datos "borrados"
+- Re-subir el mismo archivo coincidía con el hash antiguo → cargaba desde raw sin reprocesar
+
+**Solución**:
+- `limpiar_cubo_requisiciones()`: agrega `DELETE FROM cubo_requisiciones_raw` + `DELETE FROM configuracion WHERE clave = 'hash_cubo_requisiciones'`
+- `limpiar_cubo_compras()`: ídem para `cubo_compras_raw` + `hash_cubo_compras`
+- `limpiar_base_datos()`: loop sobre los 4 cubos limpiando raw + hash; también limpia tabla `compras`
+
+#### 3. UI No Reflejaba Limpieza (Caché Streamlit)
+
+**Problema**:
+- `st.cache_data` y `session_state` conservaban datos tras eliminación
+- La app mostraba datos como "cargados" incluso después de limpiar la BD
+
+**Solución**:
+- `st.cache_data.clear()` en los 4 botones individuales y en "Limpiar TODO"
+- Loop de limpieza de `session_state` que elimina todas las claves `df_*` y `cube_*`
+- `st.rerun()` forzado tras cada operación de limpieza
+
+### 🆕 Nuevo
+
+- **`_contar_registros_db(tabla)`** en `main.py`: consulta `SELECT COUNT(*)` directamente en SQLite, sin pasar por `st.cache_data`. Usado en los 4 indicadores de estado de cubos en sidebar para mostrar conteo real post-limpieza.
+
+### 📈 Resultado
+✅ OCs asignadas correctamente por proximidad temporal  
+✅ Limpieza de cubos completamente efectiva (BD + caché + UI)  
+✅ Re-carga del mismo archivo forzada si fue limpiado previamente  
+✅ Indicadores de sidebar reflejan estado real de BD  
+
+---
+
 # 📍 Estado Actual del Proyecto
 
 El proyecto se encuentra actualmente en la versión:
 
-## 🔹 **v1.5.2**
+## 🔹 **v1.6.1**
 
-Sistema completo de gestión de requisiciones y compras con:
+Sistema completo de gestión de requisiciones, compras y análisis de stock con:
 - Seguimiento avanzado de órdenes de compra con filtros de texto
-- Sincronización automática entre requisiciones y compras
+- Sincronización automática entre requisiciones y compras con validación temporal correcta
+- Módulo de Análisis Stock: estado de stock y rotación de productos
+- Persistencia de los 4 cubos con control por hash MD5
+- Invalidación completa de caché al eliminar cubos (tablas raw + hashes + session state)
 - Persistencia de filtros para mejor experiencia de usuario
 - Control granular de eliminación de datos
 - **Launcher `.exe` minimalista** (`start_app.py` + PyInstaller `--onefile`)
 - Sistema de migraciones automáticas de base de datos
-- UPSERT inteligente con detección de cambios
 
 Preparado para:
-- Dashboard avanzado con métricas de compras
-- Integración con sistema de alertas
+- Dashboard avanzado con métricas integradas
+- Módulo de ventas con análisis de tendencias
 - Reportería automatizada

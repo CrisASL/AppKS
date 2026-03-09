@@ -4,6 +4,7 @@ Incluye esquema, funciones CRUD y triggers de auditoría
 KS Seguridad Industrial - Sistema de Requisiciones
 """
 
+import hashlib
 import sqlite3
 import json
 from datetime import datetime
@@ -11,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 from contextlib import contextmanager
 from app import config
+from app.cache import get_connection, get_table, invalidar_cache
 
 
 # ============================================================================
@@ -260,8 +262,97 @@ def inicializar_base_datos():
                 WHERE id = NEW.id;
             END
         """)
-        
+
+        # ====================================================================
+        # TABLAS: cubos raw (persistencia de DataFrames en JSON)
+        # ====================================================================
+        for tabla_raw in ('cubo_ventas_raw', 'cubo_inventario_raw',
+                          'cubo_compras_raw', 'cubo_requisiciones_raw'):
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {tabla_raw} (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    data         TEXT NOT NULL,
+                    hash_archivo TEXT,
+                    fecha_carga  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
         conn.commit()
+
+
+# ============================================================================
+# PERSISTENCIA DE CUBOS RAW
+# ============================================================================
+
+def calcular_hash_archivo(archivo) -> str:
+    """
+    Calcula el hash MD5 del contenido de un UploadedFile de Streamlit.
+
+    Args:
+        archivo: Objeto retornado por st.file_uploader
+
+    Returns:
+        str: Hash MD5 hexadecimal
+    """
+    return hashlib.md5(archivo.getvalue()).hexdigest()
+
+
+def guardar_cubo_raw(nombre_cubo: str, df: pd.DataFrame, hash_archivo: str) -> None:
+    """
+    Serializa un DataFrame a JSON y lo guarda en la tabla raw correspondiente.
+    Reemplaza cualquier registro previo (una sola versión por cubo).
+    Actualiza el hash en la tabla configuracion.
+
+    Args:
+        nombre_cubo:  'ventas', 'inventario', 'compras' o 'requisiciones'
+        df:           DataFrame a persistir
+        hash_archivo: Hash MD5 del archivo fuente
+    """
+    tabla     = f"cubo_{nombre_cubo}_raw"
+    clave_hash = f"hash_cubo_{nombre_cubo}"
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"DELETE FROM {tabla}")
+        data_json = df.to_json(orient="records", date_format="iso", force_ascii=False)
+        cursor.execute(
+            f"INSERT INTO {tabla} (data, hash_archivo) VALUES (?, ?)",
+            (data_json, hash_archivo)
+        )
+        cursor.execute("""
+            INSERT OR REPLACE INTO configuracion (clave, valor, fecha_actualizacion)
+            VALUES (?, ?, CURRENT_TIMESTAMP)
+        """, (clave_hash, hash_archivo))
+
+
+def cargar_cubo_raw(nombre_cubo: str) -> Optional[pd.DataFrame]:
+    """
+    Carga y reconstruye un DataFrame desde la tabla raw de SQLite.
+
+    Args:
+        nombre_cubo: 'ventas', 'inventario', 'compras' o 'requisiciones'
+
+    Returns:
+        DataFrame reconstruido, o None si no hay dato persistido
+    """
+    tabla = f"cubo_{nombre_cubo}_raw"
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (tabla,)
+        )
+        if not cursor.fetchone():
+            return None
+        cursor.execute(f"SELECT data FROM {tabla} LIMIT 1")
+        row = cursor.fetchone()
+        if not row:
+            return None
+        df = pd.read_json(row[0], orient="records")
+        return df if not df.empty else None
+    except Exception:
+        return None
 
 
 def migrar_base_datos_existente():
@@ -584,6 +675,7 @@ def cargar_requisiciones_desde_cubo(df_cubo: pd.DataFrame) -> Tuple[int, int, Li
         mensajes_error.append(f"Error general: {str(e)}")
         return 0, 0, mensajes_error
     
+    invalidar_cache()
     return insertadas, errores, mensajes_error
 
 
@@ -594,7 +686,9 @@ def cargar_requisiciones_desde_cubo(df_cubo: pd.DataFrame) -> Tuple[int, int, Li
 def obtener_requisiciones(filtros: Optional[Dict] = None) -> pd.DataFrame:
     """
     Obtiene requisiciones con filtros opcionales.
-    
+    Usa el DataFrame cacheado (get_table) y aplica filtros en pandas,
+    evitando re-consultas a SQLite en cada interacción con filtros.
+
     Args:
         filtros (dict, optional): Diccionario con filtros
             - estado_oc: str o list - Estado(s) de la OC
@@ -605,71 +699,47 @@ def obtener_requisiciones(filtros: Optional[Dict] = None) -> pd.DataFrame:
             - codprod: str - Código de producto (búsqueda parcial)
             - oc: str - Número de OC
             - solo_pendientes: bool - Solo con saldo pendiente > 0
-    
+
     Returns:
         pd.DataFrame: DataFrame con las requisiciones encontradas
     """
-    query = "SELECT * FROM requisiciones WHERE 1=1"
-    params = []
-    
+    df = get_table('requisiciones').copy()
+
+    if df.empty:
+        return df
+
     if filtros:
-        # Filtro por estado
         if 'estado_oc' in filtros and filtros['estado_oc']:
             if isinstance(filtros['estado_oc'], list):
-                placeholders = ','.join(['?' for _ in filtros['estado_oc']])
-                query += f" AND estado_oc IN ({placeholders})"
-                params.extend(filtros['estado_oc'])
+                df = df[df['estado_oc'].isin(filtros['estado_oc'])]
             else:
-                query += " AND estado_oc = ?"
-                params.append(filtros['estado_oc'])
-        
-        # Filtro por rango de fechas
+                df = df[df['estado_oc'] == filtros['estado_oc']]
+
         if 'fecha_desde' in filtros and filtros['fecha_desde']:
-            query += " AND fecha_requisicion >= ?"
-            params.append(filtros['fecha_desde'])
-        
+            df = df[df['fecha_requisicion'].notna() & (df['fecha_requisicion'] >= str(filtros['fecha_desde']))]
+
         if 'fecha_hasta' in filtros and filtros['fecha_hasta']:
-            query += " AND fecha_requisicion <= ?"
-            params.append(filtros['fecha_hasta'])
-        
-        # Filtro por proveedor
+            df = df[df['fecha_requisicion'].notna() & (df['fecha_requisicion'] <= str(filtros['fecha_hasta']))]
+
         if 'proveedor' in filtros and filtros['proveedor']:
             if isinstance(filtros['proveedor'], list):
-                placeholders = ','.join(['?' for _ in filtros['proveedor']])
-                query += f" AND proveedor IN ({placeholders})"
-                params.extend(filtros['proveedor'])
+                df = df[df['proveedor'].isin(filtros['proveedor'])]
             else:
-                query += " AND proveedor LIKE ?"
-                params.append(f"%{filtros['proveedor']}%")
-        
-        # Filtro por número de requisición
+                df = df[df['proveedor'].str.contains(filtros['proveedor'], na=False, case=False)]
+
         if 'numreq' in filtros and filtros['numreq']:
-            query += " AND numreq LIKE ?"
-            params.append(f"%{filtros['numreq']}%")
-        
-        # Filtro por código de producto
+            df = df[df['numreq'].str.contains(filtros['numreq'], na=False, case=False)]
+
         if 'codprod' in filtros and filtros['codprod']:
-            query += " AND codprod LIKE ?"
-            params.append(f"%{filtros['codprod']}%")
-        
-        # Filtro por OC
+            df = df[df['codprod'].str.contains(filtros['codprod'], na=False, case=False)]
+
         if 'oc' in filtros and filtros['oc']:
-            query += " AND oc = ?"
-            params.append(filtros['oc'])
-        
-        # Filtro solo pendientes
-        if 'solo_pendientes' in filtros and filtros['solo_pendientes']:
-            query += " AND saldo_pendiente > 0"
-    
-    # Ordenar por fecha de creación descendente
-    query += " ORDER BY fecha_creacion DESC"
-    
-    try:
-        with get_db_connection() as conn:
-            df = pd.read_sql_query(query, conn, params=params)
-            return df
-    except Exception as e:
-        return pd.DataFrame()
+            df = df[df['oc'] == filtros['oc']]
+
+        if filtros.get('solo_pendientes'):
+            df = df[df['saldo_pendiente'] > 0]
+
+    return df.sort_values('fecha_creacion', ascending=False)
 
 
 def obtener_requisicion_por_id(requisicion_id: int) -> Optional[Dict]:
@@ -708,92 +778,67 @@ def obtener_req_pendientes() -> pd.DataFrame:
 
 def obtener_estadisticas_generales() -> Dict:
     """
-    Calcula estadísticas generales para el dashboard.
-    
+    Calcula estadísticas generales para el dashboard usando el DataFrame
+    cacheado de requisiciones.
+
     Returns:
         dict: Diccionario con métricas principales
     """
+    _defaults = {
+        'req_pendientes': 0,
+        'oc_transito': 0,
+        'productos_pendientes': 0,
+        'valor_total_oc': 0
+    }
     try:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Total de requisiciones pendientes (saldo > 0)
-            cursor.execute("SELECT COUNT(*) FROM requisiciones WHERE saldo_pendiente > 0")
-            req_pendientes = cursor.fetchone()[0]
-            
-            # OC en tránsito
-            cursor.execute("""
-                SELECT COUNT(*) FROM requisiciones 
-                WHERE estado_oc IN ('En Tránsito', 'Guía de Despacho', 'Recepción Parcial')
-            """)
-            oc_transito = cursor.fetchone()[0]
-            
-            # Productos únicos con requisiciones pendientes
-            cursor.execute("""
-                SELECT COUNT(DISTINCT codprod) FROM requisiciones 
-                WHERE saldo_pendiente > 0
-            """)
-            productos_pendientes = cursor.fetchone()[0]
-            
-            # Valor total de OC (simulado - requiere cubo de compras)
-            # Por ahora retornamos 0
-            valor_total_oc = 0
-            
-            return {
-                'req_pendientes': req_pendientes,
-                'oc_transito': oc_transito,
-                'productos_pendientes': productos_pendientes,
-                'valor_total_oc': valor_total_oc
-            }
-            
-    except Exception as e:
+        df = get_table('requisiciones')
+        if df.empty:
+            return _defaults
+
+        estados_transito = ['En Tránsito', 'Guía de Despacho', 'Recepción Parcial']
+
         return {
-            'req_pendientes': 0,
-            'oc_transito': 0,
-            'productos_pendientes': 0,
+            'req_pendientes':      int((df['saldo_pendiente'] > 0).sum()),
+            'oc_transito':         int(df['estado_oc'].isin(estados_transito).sum()),
+            'productos_pendientes': int(df.loc[df['saldo_pendiente'] > 0, 'codprod'].nunique()),
             'valor_total_oc': 0
         }
+    except Exception:
+        return _defaults
 
 
 def obtener_historial_cargas(limite: int = 50) -> pd.DataFrame:
     """
     Obtiene el historial de cargas diarias desde la tabla de auditoría.
-    
+
     Args:
         limite (int): Número máximo de registros a retornar (por defecto 50)
-    
+
     Returns:
         pd.DataFrame: DataFrame con el historial de cargas
     """
     try:
-        with get_db_connection() as conn:
-            query = """
-                SELECT 
-                    id,
-                    fecha_carga,
-                    registros_leidos,
-                    registros_insertados,
-                    registros_omitidos,
-                    errores,
-                    usuario,
-                    detalles
-                FROM cargas_diarias
-                ORDER BY fecha_carga DESC
-                LIMIT ?
-            """
-            df = pd.read_sql_query(query, conn, params=(limite,))
-            
-            # Parsear detalles JSON si existe
-            if 'detalles' in df.columns and not df.empty:
-                try:
-                    df['detalles_json'] = df['detalles'].apply(
-                        lambda x: json.loads(x) if pd.notna(x) else {}
-                    )
-                except:
-                    pass
-            
-            return df
-            
+        conn = get_connection()
+        query = """
+            SELECT
+                id, fecha_carga, registros_leidos, registros_insertados,
+                registros_omitidos, errores, usuario, detalles
+            FROM cargas_diarias
+            ORDER BY fecha_carga DESC
+            LIMIT ?
+        """
+        df = pd.read_sql_query(query, conn, params=(limite,))
+
+        if 'detalles' in df.columns and not df.empty:
+            try:
+                df['detalles_json'] = df['detalles'].apply(
+                    lambda x: json.loads(x) if pd.notna(x) else {}
+                )
+            except Exception:
+                pass
+
+        return df
+
     except Exception as e:
         print(f"Error al obtener historial de cargas: {str(e)}")
         return pd.DataFrame()
@@ -876,6 +921,7 @@ def actualizar_requisicion(requisicion_id: int, datos: Dict) -> bool:
             cursor.execute(query, params)
             
             if cursor.rowcount > 0:
+                invalidar_cache()
                 return True
             else:
                 return False
@@ -998,6 +1044,7 @@ def actualizar_requisicion_desde_ui(requisicion_id: int, datos_editados: Dict) -
             conn.commit()  # Commit explícito para asegurar persistencia
             
             if cursor.rowcount > 0:
+                invalidar_cache()
                 campos_actualizados = len(datos_seguros)
                 mensaje = f'Actualización exitosa: {campos_actualizados} campo(s) modificado(s)'
                 
@@ -1198,6 +1245,7 @@ def eliminar_requisicion(requisicion_id: int) -> bool:
             cursor.execute("DELETE FROM requisiciones WHERE id = ?", (requisicion_id,))
             
             conn.commit()
+            invalidar_cache()
             return True
             
     except Exception as e:
@@ -1211,30 +1259,26 @@ def eliminar_requisicion(requisicion_id: int) -> bool:
 def obtener_historial(requisicion_id: int) -> pd.DataFrame:
     """
     Obtiene el historial completo de cambios de una requisición.
-    
+
     Args:
         requisicion_id (int): ID de la requisición
-    
+
     Returns:
         pd.DataFrame: DataFrame con el historial de cambios
     """
     query = """
-        SELECT 
-            campo_modificado,
-            valor_anterior,
-            valor_nuevo,
-            usuario,
-            fecha_cambio
+        SELECT
+            campo_modificado, valor_anterior, valor_nuevo,
+            usuario, fecha_cambio
         FROM historial_cambios
         WHERE requisicion_id = ?
         ORDER BY fecha_cambio DESC
     """
-    
     try:
-        with get_db_connection() as conn:
-            df = pd.read_sql_query(query, conn, params=(requisicion_id,))
-            return df
-    except Exception as e:
+        conn = get_connection()
+        df = pd.read_sql_query(query, conn, params=(requisicion_id,))
+        return df
+    except Exception:
         return pd.DataFrame()
 
 
@@ -1297,86 +1341,86 @@ def obtener_configuracion(clave: str, default: str = None) -> Optional[str]:
 
 def obtener_productos_mas_solicitados(limite: int = 10) -> pd.DataFrame:
     """
-    Obtiene los productos más solicitados.
-    
+    Obtiene los productos más solicitados usando el DataFrame cacheado.
+
     Args:
         limite (int): Número máximo de productos a retornar
-    
+
     Returns:
         pd.DataFrame: DataFrame con productos y cantidad total solicitada
     """
-    query = """
-        SELECT 
-            codprod,
-            desprod,
-            COUNT(*) as num_requisiciones,
-            SUM(cantidad) as cantidad_total,
-            SUM(saldo_pendiente) as saldo_pendiente_total
-        FROM requisiciones
-        GROUP BY codprod, desprod
-        ORDER BY cantidad_total DESC
-        LIMIT ?
-    """
-    
     try:
-        with get_db_connection() as conn:
-            df = pd.read_sql_query(query, conn, params=(limite,))
-            return df
-    except Exception as e:
+        df = get_table('requisiciones')
+        if df.empty:
+            return pd.DataFrame()
+
+        result = (
+            df.groupby(['codprod', 'desprod'])
+            .agg(
+                num_requisiciones=('id', 'count'),
+                cantidad_total=('cantidad', 'sum'),
+                saldo_pendiente_total=('saldo_pendiente', 'sum')
+            )
+            .reset_index()
+            .sort_values('cantidad_total', ascending=False)
+            .head(limite)
+        )
+        return result
+    except Exception:
         return pd.DataFrame()
 
 
 def obtener_proveedores_mas_usados(limite: int = 10) -> pd.DataFrame:
     """
-    Obtiene los proveedores más utilizados.
-    
+    Obtiene los proveedores más utilizados usando el DataFrame cacheado.
+
     Args:
         limite (int): Número máximo de proveedores a retornar
-    
+
     Returns:
         pd.DataFrame: DataFrame con proveedores y número de OC
     """
-    query = """
-        SELECT 
-            proveedor,
-            COUNT(*) as num_oc,
-            COUNT(DISTINCT codprod) as num_productos
-        FROM requisiciones
-        WHERE proveedor IS NOT NULL AND proveedor != ''
-        GROUP BY proveedor
-        ORDER BY num_oc DESC
-        LIMIT ?
-    """
-    
     try:
-        with get_db_connection() as conn:
-            df = pd.read_sql_query(query, conn, params=(limite,))
-            return df
-    except Exception as e:
+        df = get_table('requisiciones')
+        if df.empty:
+            return pd.DataFrame()
+
+        df_prov = df[df['proveedor'].notna() & (df['proveedor'] != '')]
+        result = (
+            df_prov.groupby('proveedor')
+            .agg(
+                num_oc=('id', 'count'),
+                num_productos=('codprod', 'nunique')
+            )
+            .reset_index()
+            .sort_values('num_oc', ascending=False)
+            .head(limite)
+        )
+        return result
+    except Exception:
         return pd.DataFrame()
 
 
 def obtener_distribucion_estados() -> pd.DataFrame:
     """
-    Obtiene la distribución de requisiciones por estado.
-    
+    Obtiene la distribución de requisiciones por estado usando el DataFrame
+    cacheado.
+
     Returns:
         pd.DataFrame: DataFrame con estados y cantidad
     """
-    query = """
-        SELECT 
-            estado_oc,
-            COUNT(*) as cantidad
-        FROM requisiciones
-        GROUP BY estado_oc
-        ORDER BY cantidad DESC
-    """
-    
     try:
-        with get_db_connection() as conn:
-            df = pd.read_sql_query(query, conn)
-            return df
-    except Exception as e:
+        df = get_table('requisiciones')
+        if df.empty:
+            return pd.DataFrame()
+
+        return (
+            df.groupby('estado_oc')
+            .size()
+            .reset_index(name='cantidad')
+            .sort_values('cantidad', ascending=False)
+        )
+    except Exception:
         return pd.DataFrame()
 
 
@@ -1423,6 +1467,17 @@ def limpiar_base_datos() -> Tuple[bool, str]:
             cursor.execute("DELETE FROM log_eliminaciones")
             cursor.execute("DELETE FROM cargas_diarias")
             
+            # Limpiar cubos raw y hashes para que la app no muestre datos antiguos
+            for cubo in ('requisiciones', 'compras', 'ventas', 'inventario'):
+                cursor.execute(f"DELETE FROM cubo_{cubo}_raw")
+                cursor.execute("DELETE FROM configuracion WHERE clave = ?", (f"hash_cubo_{cubo}",))
+            
+            # Limpiar tabla compras si existe
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='compras'")
+            if cursor.fetchone():
+                cursor.execute("DELETE FROM compras")
+                cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'compras'")
+            
             # Resetear autoincrement
             cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('requisiciones', 'historial_cambios', 'log_eliminaciones', 'cargas_diarias')")
             
@@ -1444,6 +1499,7 @@ def limpiar_base_datos() -> Tuple[bool, str]:
             Total: {count_requisiciones + count_historial + count_eliminaciones + count_cargas} registros
             """
             
+            invalidar_cache()
             return True, mensaje
             
     except Exception as e:
@@ -1479,6 +1535,9 @@ def limpiar_cubo_requisiciones() -> Tuple[bool, str]:
             cursor.execute("DELETE FROM historial_cambios")
             cursor.execute("DELETE FROM log_eliminaciones")
             cursor.execute("DELETE FROM cargas_diarias")
+            # Limpiar raw y hash para que cargar_cubo_raw devuelva None
+            cursor.execute("DELETE FROM cubo_requisiciones_raw")
+            cursor.execute("DELETE FROM configuracion WHERE clave = 'hash_cubo_requisiciones'")
             
             # Resetear autoincrement
             cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('requisiciones', 'historial_cambios', 'log_eliminaciones', 'cargas_diarias')")
@@ -1486,6 +1545,7 @@ def limpiar_cubo_requisiciones() -> Tuple[bool, str]:
             cursor.execute("PRAGMA foreign_keys = ON")
             conn.commit()
             
+            invalidar_cache()
             return True, f"✅ Cubo de Requisiciones limpiado: {count} registros eliminados"
             
     except Exception as e:
@@ -1520,6 +1580,9 @@ def limpiar_cubo_compras() -> Tuple[bool, str]:
             
             # Limpiar tabla
             cursor.execute("DELETE FROM compras")
+            # Limpiar raw y hash para que cargar_cubo_raw devuelva None
+            cursor.execute("DELETE FROM cubo_compras_raw")
+            cursor.execute("DELETE FROM configuracion WHERE clave = 'hash_cubo_compras'")
             
             # Resetear autoincrement
             cursor.execute("DELETE FROM sqlite_sequence WHERE name = 'compras'")
@@ -1527,6 +1590,7 @@ def limpiar_cubo_compras() -> Tuple[bool, str]:
             cursor.execute("PRAGMA foreign_keys = ON")
             conn.commit()
             
+            invalidar_cache()
             return True, f"✅ Cubo de Compras limpiado: {count} registros eliminados"
             
     except Exception as e:
@@ -1568,120 +1632,200 @@ def limpiar_cubo_gestion() -> Tuple[bool, str]:
             cursor.execute("PRAGMA foreign_keys = ON")
             conn.commit()
             
+            invalidar_cache()
             return True, f"✅ Cubo de Gestión limpiado: {count} registros eliminados"
             
     except Exception as e:
         return False, f"❌ Error al limpiar cubo de gestión: {str(e)}"
 
 
-def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
+def limpiar_cubo_ventas() -> Tuple[bool, str]:
     """
-    Actualiza la tabla de requisiciones con datos de la última OC de cada producto
-    desde la tabla de seguimiento OC (compras).
-    
-    Para cada código de producto en requisiciones:
-    - Busca el registro más reciente en la tabla compras (por fecha_oc DESC)
-    - Actualiza: proveedor, fecha_oc, estado_oc
-    - Solo actualiza si encuentra datos en compras para ese producto
-    
+    Limpia el cubo de ventas (cubo_ventas_raw) de la base de datos.
+    ADVERTENCIA: Esta acción es IRREVERSIBLE.
+
     Returns:
-        Tuple[bool, str, int]: (éxito, mensaje, cantidad_actualizados)
+        Tuple[bool, str]: (éxito, mensaje)
     """
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            
-            # Verificar que existan ambas tablas
-            cursor.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name IN ('requisiciones', 'compras')
-            """)
-            tablas_existentes = {row[0] for row in cursor.fetchall()}
-            
-            if 'requisiciones' not in tablas_existentes:
-                return False, "⚠️ La tabla de requisiciones no existe", 0
-            
-            if 'compras' not in tablas_existentes:
-                return False, "⚠️ La tabla de compras no existe. Carga primero el cubo de compras.", 0
-            
-            # Contar productos que tienen datos en compras
-            cursor.execute("""
-                SELECT COUNT(DISTINCT r.codprod)
-                FROM requisiciones r
-                INNER JOIN compras c ON r.codprod = c.codprod
-            """)
-            productos_con_datos = cursor.fetchone()[0]
-            
-            if productos_con_datos == 0:
-                return False, "ℹ️ No hay productos en común entre requisiciones y compras", 0
-            
-            # Actualizar requisiciones con datos del registro más reciente de cada producto
-            # Usamos una subconsulta para obtener el registro más reciente por producto
-            cursor.execute("""
-                UPDATE requisiciones
-                SET 
-                    proveedor = (
-                        SELECT c.proveedor
-                        FROM compras c
-                        WHERE c.codprod = requisiciones.codprod
-                        ORDER BY 
-                            CASE WHEN c.fecha_oc IS NOT NULL THEN c.fecha_oc ELSE '1900-01-01' END DESC,
-                            c.id DESC
-                        LIMIT 1
-                    ),
-                    fecha_oc = (
-                        SELECT c.fecha_oc
-                        FROM compras c
-                        WHERE c.codprod = requisiciones.codprod
-                        ORDER BY 
-                            CASE WHEN c.fecha_oc IS NOT NULL THEN c.fecha_oc ELSE '1900-01-01' END DESC,
-                            c.id DESC
-                        LIMIT 1
-                    ),
-                    estado_oc = (
-                        SELECT c.estado_linea
-                        FROM compras c
-                        WHERE c.codprod = requisiciones.codprod
-                        ORDER BY 
-                            CASE WHEN c.fecha_oc IS NOT NULL THEN c.fecha_oc ELSE '1900-01-01' END DESC,
-                            c.id DESC
-                        LIMIT 1
-                    ),
-                    oc = (
-                        SELECT c.num_oc
-                        FROM compras c
-                        WHERE c.codprod = requisiciones.codprod
-                        ORDER BY 
-                            CASE WHEN c.fecha_oc IS NOT NULL THEN c.fecha_oc ELSE '1900-01-01' END DESC,
-                            c.id DESC
-                        LIMIT 1
-                    )
-                WHERE EXISTS (
-                    SELECT 1 FROM compras c 
-                    WHERE c.codprod = requisiciones.codprod
-                )
-            """)
-            
-            registros_actualizados = cursor.rowcount
+            cursor.execute("SELECT COUNT(*) FROM cubo_ventas_raw")
+            count = cursor.fetchone()[0]
+            cursor.execute("DELETE FROM cubo_ventas_raw")
+            cursor.execute("DELETE FROM configuracion WHERE clave = 'hash_cubo_ventas'")
             conn.commit()
-            
-            mensaje = f"""✅ Actualización completada exitosamente
-
-📊 **Resultados:**
-- {registros_actualizados} requisiciones actualizadas
-- {productos_con_datos} productos con datos de compras
-
-**Campos actualizados:**
-- ✓ Proveedor (último de cada producto)
-- ✓ N° OC (más reciente)
-- ✓ Fecha OC (más reciente)
-- ✓ Estado OC (más reciente)
-"""
-            
-            return True, mensaje, registros_actualizados
-            
+            invalidar_cache()
+            return True, f"✅ Cubo de Ventas limpiado: {count} registros eliminados"
     except Exception as e:
-        return False, f"❌ Error al actualizar requisiciones: {str(e)}", 0
+        return False, f"❌ Error al limpiar cubo de ventas: {str(e)}"
+
+
+def limpiar_cubo_inventario() -> Tuple[bool, str]:
+    """
+    Limpia el cubo de inventario (cubo_inventario_raw) de la base de datos.
+    ADVERTENCIA: Esta acción es IRREVERSIBLE.
+
+    Returns:
+        Tuple[bool, str]: (éxito, mensaje)
+    """
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM cubo_inventario_raw")
+            count = cursor.fetchone()[0]
+            cursor.execute("DELETE FROM cubo_inventario_raw")
+            cursor.execute("DELETE FROM configuracion WHERE clave = 'hash_cubo_inventario'")
+            conn.commit()
+            invalidar_cache()
+            return True, f"✅ Cubo de Inventario limpiado: {count} registros eliminados"
+    except Exception as e:
+        return False, f"❌ Error al limpiar cubo de inventario: {str(e)}"
+
+
+def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
+    """
+    Cruza requisiciones con órdenes de compra aplicando reglas de negocio estrictas.
+
+    Reglas de matching (todas deben cumplirse):
+    1. codprod_req == codprod_oc
+    2. fecha_oc >= fecha_req  (la OC no puede ser anterior a la REQ)
+    3. fecha_oc <= fecha_req + 90 días  (ventana temporal máxima)
+    4. cantidad_oc >= cantidad_req * 0.8  (compatibilidad de cantidad)
+
+    Selección: entre candidatas válidas se elige la de fecha_oc más cercana
+    posterior a la requisición (fecha_oc ASC).
+    Si no existe candidata válida, no se actualiza la REQ.
+
+    Returns:
+        Tuple[bool, str, int]: (éxito, mensaje, cantidad_actualizados)
+    """
+    VENTANA_DIAS = 90
+    FACTOR_CANTIDAD = 0.8
+
+    try:
+        conn = get_connection()
+
+        # Verificar existencia de tablas
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table' AND name IN ('requisiciones', 'compras')
+        """)
+        tablas = {row[0] for row in cursor.fetchall()}
+        if 'requisiciones' not in tablas:
+            return False, "⚠️ La tabla de requisiciones no existe", 0
+        if 'compras' not in tablas:
+            return False, "⚠️ La tabla de compras no existe. Carga primero el cubo de compras.", 0
+
+        # Cargar datos necesarios
+        df_req = pd.read_sql(
+            "SELECT id, codprod, cantidad, fecha_requisicion FROM requisiciones",
+            conn
+        )
+        df_oc = pd.read_sql(
+            "SELECT num_oc, codprod, cantidad_solicitada, fecha_oc, proveedor, estado_linea FROM compras",
+            conn
+        )
+
+        if df_req.empty or df_oc.empty:
+            return False, "ℹ️ No hay suficientes datos para el cruce", 0
+
+        # 1. Convertir fechas a datetime — errores se vuelven NaT
+        df_req['fecha_req'] = pd.to_datetime(df_req['fecha_requisicion'], errors='coerce')
+        df_oc['fecha_oc_dt'] = pd.to_datetime(df_oc['fecha_oc'], errors='coerce')
+
+        # 2. Eliminar filas con fechas inválidas
+        df_req = df_req.dropna(subset=['fecha_req'])
+        df_oc  = df_oc.dropna(subset=['fecha_oc_dt'])
+
+        if df_req.empty or df_oc.empty:
+            return False, "ℹ️ No hay datos con fechas válidas para el cruce", 0
+
+        actualizados = 0
+        sin_match    = 0
+
+        with get_db_connection() as write_conn:
+            write_cursor = write_conn.cursor()
+
+            for _, req in df_req.iterrows():
+                fecha_req = req['fecha_req']
+                cant_min  = req['cantidad'] * FACTOR_CANTIDAD
+                req_id    = req['id']
+
+                # Debug — verificar fecha de cada REQ procesada
+                print(f"REQ {req_id} fecha {fecha_req}")
+
+                # Regla 1: mismo producto
+                candidatas = df_oc[df_oc['codprod'] == req['codprod']].copy()
+
+                if candidatas.empty:
+                    sin_match += 1
+                    continue
+
+                # 3. Filtro temporal obligatorio: OC debe ser posterior a la REQ
+                # 4. Ventana máxima de 90 días
+                candidatas = candidatas[
+                    (candidatas['fecha_oc_dt'] >= fecha_req) &
+                    (candidatas['fecha_oc_dt'] <= fecha_req + pd.Timedelta(days=VENTANA_DIAS))
+                ]
+
+                # Regla de cantidad: OC >= 80% de cantidad REQ
+                candidatas = candidatas[
+                    candidatas['cantidad_solicitada'].notna() &
+                    (candidatas['cantidad_solicitada'] >= cant_min)
+                ]
+
+                if candidatas.empty:
+                    sin_match += 1
+                    continue
+
+                # Debug — mostrar candidatas válidas antes de selección
+                print(candidatas[['num_oc', 'fecha_oc_dt', 'cantidad_solicitada']])
+
+                # 5. Calcular diferencia en días y ordenar por la más cercana
+                candidatas = candidatas.copy()
+                candidatas['diff'] = (candidatas['fecha_oc_dt'] - fecha_req).dt.days
+                candidatas = candidatas.sort_values('diff')
+
+                # 6. Seleccionar primera candidata (OC más cercana posterior a la REQ)
+                mejor = candidatas.iloc[0]
+
+                write_cursor.execute("""
+                    UPDATE requisiciones
+                    SET proveedor  = ?,
+                        oc         = ?,
+                        fecha_oc   = ?,
+                        estado_oc  = ?
+                    WHERE id = ?
+                """, (
+                    mejor['proveedor'],
+                    mejor['num_oc'],
+                    mejor['fecha_oc'],
+                    mejor['estado_linea'],
+                    int(req_id)
+                ))
+                actualizados += 1
+
+            write_conn.commit()
+
+        invalidar_cache()
+
+        mensaje = (
+            f"✅ Cruce REQ→OC completado\n\n"
+            f"📊 **Resultados:**\n"
+            f"- {actualizados} requisiciones actualizadas\n"
+            f"- {sin_match} requisiciones sin coincidencia válida\n\n"
+            f"**Criterios aplicados:**\n"
+            f"- ✓ Mismo producto (codprod)\n"
+            f"- ✓ Ventana temporal: 0–{VENTANA_DIAS} días desde la REQ\n"
+            f"- ✓ Cantidad OC ≥ {int(FACTOR_CANTIDAD*100)}% de cantidad REQ\n"
+            f"- ✓ Selección: OC más cercana posterior a la REQ"
+        )
+        return True, mensaje, actualizados
+
+    except Exception as e:
+        return False, f"❌ Error al cruzar requisiciones con compras: {str(e)}", 0
 
 
 # ============================================================================

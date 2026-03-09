@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Tuple, List, Dict, Optional
 from contextlib import contextmanager
 from app import config
+from app.cache import invalidar_cache
 
 
 # ============================================================================
@@ -631,6 +632,7 @@ def cargar_compras_desde_dataframe(df: pd.DataFrame, conn: sqlite3.Connection) -
     # Commit final
     conn.commit()
     
+    invalidar_cache()
     print(f"✅ Carga completada: {insertados} insertados, {actualizados} actualizados, {sin_cambios} sin cambios")
     
     return insertados, actualizados, sin_cambios, mensajes_error

@@ -15,7 +15,9 @@ import os
 from app import config
 from app import database as db
 from app import utils
+from app.cache import get_table, invalidar_cache
 from app.services import compras_service
+from app.modules.analisis_stock import view as analisis_stock_view
 
 
 # ============================================================================
@@ -55,16 +57,16 @@ st.set_page_config(**config.PAGE_CONFIG)
 def inicializar_session_state():
     """Inicializa variables de sesión de Streamlit."""
     if 'cubo_requisiciones' not in st.session_state:
-        st.session_state.cubo_requisiciones = None
-    
+        st.session_state.cubo_requisiciones = db.cargar_cubo_raw('requisiciones')
+
     if 'cubo_compras' not in st.session_state:
-        st.session_state.cubo_compras = None
-    
+        st.session_state.cubo_compras = db.cargar_cubo_raw('compras')
+
     if 'cubo_ventas' not in st.session_state:
-        st.session_state.cubo_ventas = None
-    
+        st.session_state.cubo_ventas = db.cargar_cubo_raw('ventas')
+
     if 'cubo_inventario' not in st.session_state:
-        st.session_state.cubo_inventario = None
+        st.session_state.cubo_inventario = db.cargar_cubo_raw('inventario')
     
     if 'pagina_actual' not in st.session_state:
         st.session_state.pagina_actual = '📊 Dashboard'
@@ -229,6 +231,24 @@ def cargar_cubo_excel(archivo, tipo_cubo: str, key_prefix: str = ""):
     return df
 
 
+def _contar_registros_db(tabla: str) -> int:
+    """Consulta conteo real de registros en la tabla, sin caché."""
+    try:
+        import sqlite3
+        conn = sqlite3.connect(config.DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tabla,))
+        if cursor.fetchone() is None:
+            conn.close()
+            return 0
+        cursor.execute(f"SELECT COUNT(*) FROM {tabla}")
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    except Exception:
+        return 0
+
+
 def seccion_carga_cubos():
     """Sección para cargar los 4 cubos Excel."""
     st.header("📥 Cargar Cubos Excel")
@@ -245,21 +265,51 @@ def seccion_carga_cubos():
             help="Cubo con requisiciones y stock por bodega"
         )
         
+        # Indicador de estado persistido
+        if st.session_state.cubo_requisiciones is not None and archivo_req is None:
+            _count = _contar_registros_db('requisiciones')
+            if _count == 0:
+                st.session_state.cubo_requisiciones = None
+                st.warning("No hay requisiciones cargadas. Sube un archivo para iniciar.")
+            else:
+                st.info(f"🗄️ Requisiciones cargadas desde base de datos ({_count} registros). Sube un nuevo archivo para actualizar.")
+
         if archivo_req:
-            df = cargar_cubo_excel(archivo_req, 'requisiciones', 'req')
-            if df is not None:
-                st.session_state.cubo_requisiciones = df
-                
-                # Cargar requisiciones automáticamente a la base de datos
-                with st.spinner("Cargando requisiciones a la base de datos..."):
-                    insertadas, errores, mensajes = db.cargar_requisiciones_desde_cubo(df)
-                    
+            hash_nuevo   = db.calcular_hash_archivo(archivo_req)
+            hash_guardado = db.obtener_configuracion('hash_cubo_requisiciones')
+
+            if hash_nuevo == hash_guardado:
+                df_sqlite = db.cargar_cubo_raw('requisiciones')
+                if df_sqlite is not None:
+                    st.session_state.cubo_requisiciones = df_sqlite
+                    st.info(f"ℹ️ Archivo sin cambios — datos cargados desde base de datos ({len(df_sqlite)} registros)")
+                else:
+                    df = cargar_cubo_excel(archivo_req, 'requisiciones', 'req')
+                    if df is not None:
+                        st.session_state.cubo_requisiciones = df
+                        with st.spinner("Guardando requisiciones en base de datos..."):
+                            db.guardar_cubo_raw('requisiciones', df, hash_nuevo)
+                            insertadas, errores, mensajes = db.cargar_requisiciones_desde_cubo(df)
+                        if insertadas > 0:
+                            st.success(f"✅ {insertadas} requisiciones cargadas exitosamente")
+                        if errores > 0:
+                            with st.expander(f"⚠️ {errores} errores durante la carga"):
+                                for msg in mensajes[:10]:
+                                    st.warning(msg)
+                                if len(mensajes) > 10:
+                                    st.info(f"... y {len(mensajes) - 10} errores más")
+            else:
+                df = cargar_cubo_excel(archivo_req, 'requisiciones', 'req')
+                if df is not None:
+                    st.session_state.cubo_requisiciones = df
+                    with st.spinner("Guardando requisiciones en base de datos..."):
+                        db.guardar_cubo_raw('requisiciones', df, hash_nuevo)
+                        insertadas, errores, mensajes = db.cargar_requisiciones_desde_cubo(df)
                     if insertadas > 0:
-                        st.success(f"✅ {insertadas} requisiciones cargadas exitosamente")
-                    
+                        st.success(f"✅ {insertadas} requisiciones cargadas — cubo actualizado")
                     if errores > 0:
                         with st.expander(f"⚠️ {errores} errores durante la carga"):
-                            for msg in mensajes[:10]:  # Mostrar primeros 10 errores
+                            for msg in mensajes[:10]:
                                 st.warning(msg)
                             if len(mensajes) > 10:
                                 st.info(f"... y {len(mensajes) - 10} errores más")
@@ -273,11 +323,39 @@ def seccion_carga_cubos():
             key='upload_ventas',
             help="Cubo con histórico de ventas mensuales"
         )
-        
+
+        # Indicador de estado persistido
+        if st.session_state.cubo_ventas is not None and archivo_ventas is None:
+            _count = _contar_registros_db('ventas')
+            if _count == 0:
+                st.session_state.cubo_ventas = None
+                st.warning("No hay ventas cargadas. Sube un archivo para iniciar.")
+            else:
+                st.info(f"🗄️ Ventas cargadas desde base de datos ({_count} registros). Sube un nuevo archivo para actualizar.")
+
         if archivo_ventas:
-            df = cargar_cubo_excel(archivo_ventas, 'ventas', 'ventas')
-            if df is not None:
-                st.session_state.cubo_ventas = df
+            hash_nuevo    = db.calcular_hash_archivo(archivo_ventas)
+            hash_guardado = db.obtener_configuracion('hash_cubo_ventas')
+
+            if hash_nuevo == hash_guardado:
+                df_sqlite = db.cargar_cubo_raw('ventas')
+                if df_sqlite is not None:
+                    st.session_state.cubo_ventas = df_sqlite
+                    st.info(f"ℹ️ Archivo sin cambios — datos cargados desde base de datos ({len(df_sqlite)} registros)")
+                else:
+                    df = cargar_cubo_excel(archivo_ventas, 'ventas', 'ventas')
+                    if df is not None:
+                        st.session_state.cubo_ventas = df
+                        with st.spinner("Guardando ventas en base de datos..."):
+                            db.guardar_cubo_raw('ventas', df, hash_nuevo)
+                        st.success(f"✅ Ventas guardadas en base de datos ({len(df)} registros)")
+            else:
+                df = cargar_cubo_excel(archivo_ventas, 'ventas', 'ventas')
+                if df is not None:
+                    st.session_state.cubo_ventas = df
+                    with st.spinner("Guardando ventas en base de datos..."):
+                        db.guardar_cubo_raw('ventas', df, hash_nuevo)
+                    st.success(f"✅ Cubo de ventas actualizado y guardado en base de datos ({len(df)} registros)")
     
     with col2:
         st.subheader("🛒 Cubo de Compras")
@@ -288,12 +366,41 @@ def seccion_carga_cubos():
             help="Cubo con órdenes de compra"
         )
         
+        # Indicador de estado persistido
+        if st.session_state.cubo_compras is not None and archivo_compras is None:
+            _count = _contar_registros_db('compras')
+            if _count == 0:
+                st.session_state.cubo_compras = None
+                st.warning("No hay compras cargadas. Sube un archivo para iniciar.")
+            else:
+                st.info(f"🗄️ Compras cargadas desde base de datos ({_count} registros). Sube un nuevo archivo para actualizar.")
+
         if archivo_compras:
-            df = cargar_cubo_excel(archivo_compras, 'compras', 'compras')
+            hash_nuevo    = db.calcular_hash_archivo(archivo_compras)
+            hash_guardado = db.obtener_configuracion('hash_cubo_compras')
+
+            if hash_nuevo == hash_guardado:
+                df_sqlite = db.cargar_cubo_raw('compras')
+                if df_sqlite is not None:
+                    st.session_state.cubo_compras = df_sqlite
+                    st.info(f"ℹ️ Archivo sin cambios — datos cargados desde base de datos ({len(df_sqlite)} registros)")
+                else:
+                    df = cargar_cubo_excel(archivo_compras, 'compras', 'compras')
+                    if df is not None:
+                        st.session_state.cubo_compras = df
+                        with st.spinner("Guardando compras en base de datos..."):
+                            db.guardar_cubo_raw('compras', df, hash_nuevo)
+                        st.success(f"✅ Cubo cargado: {len(df)} registros")
+            else:
+                df = cargar_cubo_excel(archivo_compras, 'compras', 'compras')
+                if df is not None:
+                    st.session_state.cubo_compras = df
+                    with st.spinner("Guardando compras en base de datos..."):
+                        db.guardar_cubo_raw('compras', df, hash_nuevo)
+                    st.success(f"✅ Cubo de compras actualizado y guardado en base de datos ({len(df)} registros)")
+
+            df = st.session_state.cubo_compras
             if df is not None:
-                st.session_state.cubo_compras = df
-                st.success(f"✅ Cubo cargado: {len(df)} registros")
-                
                 # Diagnóstico de fechas
                 with st.expander("🔍 Diagnóstico de Columnas de Fecha", expanded=False):
                     st.markdown("**Verificación de columnas FechaOC y FechaRecepcion:**")
@@ -396,11 +503,39 @@ def seccion_carga_cubos():
             key='upload_inventario',
             help="Cubo con stock por bodega"
         )
-        
+
+        # Indicador de estado persistido
+        if st.session_state.cubo_inventario is not None and archivo_inventario is None:
+            _count = _contar_registros_db('inventario')
+            if _count == 0:
+                st.session_state.cubo_inventario = None
+                st.warning("No hay inventario cargado. Sube un archivo para iniciar.")
+            else:
+                st.info(f"🗄️ Inventario cargado desde base de datos ({_count} registros). Sube un nuevo archivo para actualizar.")
+
         if archivo_inventario:
-            df = cargar_cubo_excel(archivo_inventario, 'inventario', 'inventario')
-            if df is not None:
-                st.session_state.cubo_inventario = df
+            hash_nuevo    = db.calcular_hash_archivo(archivo_inventario)
+            hash_guardado = db.obtener_configuracion('hash_cubo_inventario')
+
+            if hash_nuevo == hash_guardado:
+                df_sqlite = db.cargar_cubo_raw('inventario')
+                if df_sqlite is not None:
+                    st.session_state.cubo_inventario = df_sqlite
+                    st.info(f"ℹ️ Archivo sin cambios — datos cargados desde base de datos ({len(df_sqlite)} registros)")
+                else:
+                    df = cargar_cubo_excel(archivo_inventario, 'inventario', 'inventario')
+                    if df is not None:
+                        st.session_state.cubo_inventario = df
+                        with st.spinner("Guardando inventario en base de datos..."):
+                            db.guardar_cubo_raw('inventario', df, hash_nuevo)
+                        st.success(f"✅ Inventario guardado en base de datos ({len(df)} registros)")
+            else:
+                df = cargar_cubo_excel(archivo_inventario, 'inventario', 'inventario')
+                if df is not None:
+                    st.session_state.cubo_inventario = df
+                    with st.spinner("Guardando inventario en base de datos..."):
+                        db.guardar_cubo_raw('inventario', df, hash_nuevo)
+                    st.success(f"✅ Cubo de inventario actualizado y guardado en base de datos ({len(df)} registros)")
     
     # Actualizar estado de carga
     cubos_cargados = [
@@ -951,10 +1086,8 @@ def pagina_seguimiento_oc():
         st.session_state.filtro_estado_seleccionado = "Todos"
     if 'filtro_buscar_producto' not in st.session_state:
         st.session_state.filtro_buscar_producto = ""
-    if 'filtro_nombre_producto' not in st.session_state:
-        st.session_state.filtro_nombre_producto = ""
-    if 'filtro_comienza_con' not in st.session_state:
-        st.session_state.filtro_comienza_con = ""
+    if 'filtro_observacion' not in st.session_state:
+        st.session_state.filtro_observacion = ""
     
     # Verificar si existe la tabla de compras
     try:
@@ -1040,7 +1173,7 @@ def pagina_seguimiento_oc():
                 st.session_state.filtro_estado_seleccionado = estado_seleccionado
             
             # Filtros de texto en una sola fila
-            col_txt1, col_txt2, col_txt3 = st.columns(3)
+            col_txt1, col_txt2 = st.columns(2)
             
             with col_txt1:
                 # Búsqueda por código de producto
@@ -1053,32 +1186,21 @@ def pagina_seguimiento_oc():
                 st.session_state.filtro_buscar_producto = buscar_producto
             
             with col_txt2:
-                # Búsqueda por nombre de producto
-                nombre_producto = st.text_input(
-                    "📝 Buscar por nombre:",
-                    value=st.session_state.filtro_nombre_producto,
-                    help="Busca productos por su descripción (nombre)",
-                    key="txt_nombre_producto"
+                # Búsqueda por observación (case-insensitive, null-safe)
+                buscar_observacion = st.text_input(
+                    "💬 Buscar en observaciones:",
+                    value=st.session_state.filtro_observacion,
+                    help="Filtra registros cuya observación contenga este texto",
+                    key="txt_observacion"
                 )
-                st.session_state.filtro_nombre_producto = nombre_producto
-            
-            with col_txt3:
-                # Filtro "comienza con"
-                comienza_con = st.text_input(
-                    "🔤 Nombre comienza con:",
-                    value=st.session_state.filtro_comienza_con,
-                    help="Filtra productos cuyo nombre comience con estas letras",
-                    key="txt_comienza_con"
-                )
-                st.session_state.filtro_comienza_con = comienza_con
+                st.session_state.filtro_observacion = buscar_observacion
             
             # Botón para limpiar filtros
             if st.button("🔄 Limpiar Filtros", type="secondary"):
                 st.session_state.filtro_oc_seleccionada = "Todas"
                 st.session_state.filtro_estado_seleccionado = "Todos"
                 st.session_state.filtro_buscar_producto = ""
-                st.session_state.filtro_nombre_producto = ""
-                st.session_state.filtro_comienza_con = ""
+                st.session_state.filtro_observacion = ""
                 st.rerun()
             
             st.markdown("---")
@@ -1123,20 +1245,16 @@ def pagina_seguimiento_oc():
                 query += " AND codprod LIKE ?"
                 params.append(f"%{buscar_producto}%")
             
-            # Aplicar búsqueda de nombre de producto
-            if nombre_producto:
-                query += " AND desprod LIKE ?"
-                params.append(f"%{nombre_producto}%")
-            
-            # Aplicar filtro "comienza con"
-            if comienza_con:
-                query += " AND desprod LIKE ?"
-                params.append(f"{comienza_con}%")
-            
             query += " ORDER BY num_oc, codprod"
             
             # Ejecutar query y obtener datos
             df_compras = pd.read_sql_query(query, conn, params=params)
+            
+            # Filtro por observación (pandas, case-insensitive, null-safe)
+            if buscar_observacion:
+                df_compras = df_compras[df_compras["Observación"].str.contains(
+                    buscar_observacion, case=False, na=False
+                )]
             
             # Mostrar título de resultados
             st.subheader(f"📋 Detalle de Órdenes de Compra ({len(df_compras)} líneas)")
@@ -1225,24 +1343,26 @@ def pagina_seguimiento_oc():
 # ============================================================================
 
 def pagina_analisis_stock():
-    """Página para análisis de stock vs requisiciones."""
+    """Página para análisis de stock vs ventas — KS Talca."""
     st.title("📈 Análisis de Stock")
-    
+
+    cubos_faltantes = []
     if st.session_state.cubo_inventario is None:
-        st.warning("⚠️ Carga el cubo de inventario para ver esta sección")
+        cubos_faltantes.append("📦 Cubo de Inventario")
+    if st.session_state.cubo_ventas is None:
+        cubos_faltantes.append("📊 Cubo de Ventas")
+
+    if cubos_faltantes:
+        st.warning(
+            "⚠️ Para ver este análisis debes cargar los siguientes cubos en el Dashboard:\n\n"
+            + "\n".join(f"- {c}" for c in cubos_faltantes)
+        )
         return
-    
-    st.info("🚧 Esta sección está en desarrollo")
-    
-    # Preview de funcionalidad
-    st.markdown("""
-    ### Funcionalidades planificadas:
-    - 📊 Comparación stock vs requisiciones pendientes
-    - 🔄 Sugerencias de transferencias entre bodegas
-    - ⚠️ Alertas de stock crítico
-    - 📈 Análisis de rotación de productos
-    - 🎯 Recomendaciones de compra
-    """)
+
+    analisis_stock_view.render(
+        cubo_inventario=st.session_state.cubo_inventario,
+        cubo_ventas=st.session_state.cubo_ventas,
+    )
 
 
 # ============================================================================
@@ -1324,19 +1444,21 @@ def pagina_configuracion():
         
         st.markdown("---")
         
-        # Estadísticas de la base de datos
+        # Estadísticas de la base de datos (usando caché)
         st.subheader("📈 Estadísticas de Datos")
         
-        stats = db.obtener_estadisticas_generales()
+        df_req = get_table('requisiciones')
+        stats  = db.obtener_estadisticas_generales()
         
-        col1, col2 = st.columns(2)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
-            st.metric("Total Requisiciones", stats['req_pendientes'] + stats['oc_transito'])
-            st.metric("Productos Únicos", stats['productos_pendientes'])
-        
+            st.metric("Total Requisiciones", len(df_req))
         with col2:
+            st.metric("Productos Únicos", stats['productos_pendientes'])
+        with col3:
             st.metric("REQ Pendientes", stats['req_pendientes'])
+        with col4:
             st.metric("OC en Tránsito", stats['oc_transito'])
     
     with tab3:
@@ -1443,104 +1565,108 @@ def pagina_configuracion():
         # ========== LIMPIAR CUBOS INDIVIDUALES ==========
         st.subheader("🗂️ Limpiar Cubos Individuales")
         
-        col_cubos1, col_cubos2, col_cubos3 = st.columns(3)
+        col_c1, col_c2, col_c3, col_c4 = st.columns(4)
         
         # CUBO DE REQUISICIONES
-        with col_cubos1:
-            with st.expander("📋 Cubo de Requisiciones", expanded=False):
-                st.markdown("""
-                **Elimina:**
-                - Requisiciones
-                - Historial de cambios
-                - Log de eliminaciones
-                - Cargas diarias
-                """)
-                
-                confirm_req = st.checkbox(
-                    "Confirmar limpieza",
-                    key="confirm_req"
-                )
-                
+        with col_c1:
+            with st.expander("📋 Requisiciones", expanded=False):
+                st.markdown("**Elimina:** requisiciones, historial y cargas.")
+                confirm_req = st.checkbox("Confirmar limpieza", key="confirm_req")
                 if st.button(
-                    "🗑️ Limpiar Requisiciones",
+                    "🗑️ Limpiar",
                     type="secondary",
                     disabled=not confirm_req,
                     use_container_width=True,
                     key="btn_limpiar_req"
                 ):
-                    with st.spinner("Limpiando cubo de requisiciones..."):
+                    with st.spinner("Limpiando..."):
                         exito, mensaje = db.limpiar_cubo_requisiciones()
-                        
                         if exito:
                             st.success(mensaje)
-                            if 'cubo_requisiciones' in st.session_state:
-                                del st.session_state.cubo_requisiciones
+                            st.session_state.pop('cubo_requisiciones', None)
+                            for _k in list(st.session_state.keys()):
+                                if _k.startswith("df_") or _k.startswith("cube_"):
+                                    del st.session_state[_k]
+                            invalidar_cache()
+                            st.cache_data.clear()
                             st.rerun()
                         else:
                             st.error(mensaje)
         
         # CUBO DE COMPRAS
-        with col_cubos2:
-            with st.expander("📦 Cubo de Compras", expanded=False):
-                st.markdown("""
-                **Elimina:**
-                - Órdenes de compra
-                - Líneas de productos
-                - Seguimiento OC
-                """)
-                
-                confirm_compras = st.checkbox(
-                    "Confirmar limpieza",
-                    key="confirm_compras"
-                )
-                
+        with col_c2:
+            with st.expander("🛒 Compras", expanded=False):
+                st.markdown("**Elimina:** órdenes de compra y seguimiento OC.")
+                confirm_compras = st.checkbox("Confirmar limpieza", key="confirm_compras")
                 if st.button(
-                    "🗑️ Limpiar Compras",
+                    "🗑️ Limpiar",
                     type="secondary",
                     disabled=not confirm_compras,
                     use_container_width=True,
                     key="btn_limpiar_compras"
                 ):
-                    with st.spinner("Limpiando cubo de compras..."):
+                    with st.spinner("Limpiando..."):
                         exito, mensaje = db.limpiar_cubo_compras()
-                        
                         if exito:
                             st.success(mensaje)
-                            if 'cubo_compras' in st.session_state:
-                                del st.session_state.cubo_compras
+                            st.session_state.pop('cubo_compras', None)
+                            for _k in list(st.session_state.keys()):
+                                if _k.startswith("df_") or _k.startswith("cube_"):
+                                    del st.session_state[_k]
+                            invalidar_cache()
+                            st.cache_data.clear()
                             st.rerun()
                         else:
                             st.error(mensaje)
         
-        # CUBO DE GESTIÓN
-        with col_cubos3:
-            with st.expander("📊 Cubo de Gestión", expanded=False):
-                st.markdown("""
-                **Elimina:**
-                - Datos de gestión
-                - Cruce REQ-OC
-                - Seguimiento avanzado
-                """)
-                
-                confirm_gestion = st.checkbox(
-                    "Confirmar limpieza",
-                    key="confirm_gestion"
-                )
-                
+        # CUBO DE VENTAS
+        with col_c3:
+            with st.expander("📊 Ventas", expanded=False):
+                st.markdown("**Elimina:** datos del cubo de ventas.")
+                confirm_ventas = st.checkbox("Confirmar limpieza", key="confirm_ventas")
                 if st.button(
-                    "🗑️ Limpiar Gestión",
+                    "🗑️ Limpiar",
                     type="secondary",
-                    disabled=not confirm_gestion,
+                    disabled=not confirm_ventas,
                     use_container_width=True,
-                    key="btn_limpiar_gestion"
+                    key="btn_limpiar_ventas"
                 ):
-                    with st.spinner("Limpiando cubo de gestión..."):
-                        exito, mensaje = db.limpiar_cubo_gestion()
-                        
+                    with st.spinner("Limpiando..."):
+                        exito, mensaje = db.limpiar_cubo_ventas()
                         if exito:
                             st.success(mensaje)
-                            if 'cubo_gestion' in st.session_state:
-                                del st.session_state.cubo_gestion
+                            st.session_state.pop('cubo_ventas', None)
+                            for _k in list(st.session_state.keys()):
+                                if _k.startswith("df_") or _k.startswith("cube_"):
+                                    del st.session_state[_k]
+                            invalidar_cache()
+                            st.cache_data.clear()
+                            st.rerun()
+                        else:
+                            st.error(mensaje)
+        
+        # CUBO DE INVENTARIO
+        with col_c4:
+            with st.expander("📦 Inventario", expanded=False):
+                st.markdown("**Elimina:** datos del cubo de inventario.")
+                confirm_inventario = st.checkbox("Confirmar limpieza", key="confirm_inventario")
+                if st.button(
+                    "🗑️ Limpiar",
+                    type="secondary",
+                    disabled=not confirm_inventario,
+                    use_container_width=True,
+                    key="btn_limpiar_inventario"
+                ):
+                    with st.spinner("Limpiando..."):
+                        exito, mensaje = db.limpiar_cubo_inventario()
+                        if exito:
+                            st.success(mensaje)
+                            st.session_state.pop('cubo_inventario', None)
+                            for _k in list(st.session_state.keys()):
+                                if _k.startswith("df_") or _k.startswith("cube_"):
+                                    del st.session_state[_k]
+                            invalidar_cache()
+                            st.cache_data.clear()
                             st.rerun()
                         else:
                             st.error(mensaje)
@@ -1585,16 +1711,18 @@ def pagina_configuracion():
                         st.success(mensaje)
                         st.balloons()
                         
-                        # Limpiar el session state
+                        # Limpiar session state y caché
                         st.session_state.datos_cargados = False
-                        if 'cubo_requisiciones' in st.session_state:
-                            del st.session_state.cubo_requisiciones
-                        if 'cubo_compras' in st.session_state:
-                            del st.session_state.cubo_compras
-                        if 'cubo_gestion' in st.session_state:
-                            del st.session_state.cubo_gestion
+                        for key in ('cubo_requisiciones', 'cubo_compras', 'cubo_ventas', 'cubo_inventario'):
+                            st.session_state.pop(key, None)
+                        for _k in list(st.session_state.keys()):
+                            if _k.startswith("df_") or _k.startswith("cube_"):
+                                del st.session_state[_k]
+                        invalidar_cache()
+                        st.cache_data.clear()
                         
                         st.info("💡 **Próximo paso:** Ve al Dashboard y carga tus cubos de datos")
+                        st.rerun()
                     else:
                         st.error(mensaje)
         

@@ -3,10 +3,12 @@ Funciones auxiliares y utilidades
 KS Seguridad Industrial - Sistema de Requisiciones
 """
 
+import hashlib
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from app import config
+from app import cache as _cache
 
 
 # ============================================================================
@@ -102,52 +104,102 @@ def validar_cubo_inventario(df: pd.DataFrame) -> Tuple[bool, str, List[str]]:
     )
 
 
+def _leer_excel_hoja(archivo, hoja: str, tipo_cubo: str) -> pd.DataFrame:
+    """
+    Lee una hoja de Excel aplicando lógica especial según el tipo de cubo.
+
+    Para los cubos de ventas e inventario detecta automáticamente la fila de
+    encabezado real buscando la primera fila que contenga el texto 'CodProd',
+    ya que ambos archivos provienen de tablas dinámicas (pivot tables) con
+    metadatos en las filas superiores.
+
+    Para el resto de cubos usa `pd.read_excel` estándar.
+    """
+    # Cubos que provienen de pivot tables con encabezado desplazado
+    CUBOS_PIVOT = {'ventas', 'inventario'}
+
+    if tipo_cubo not in CUBOS_PIVOT:
+        return pd.read_excel(archivo, sheet_name=hoja)
+
+    # ── Detección automática del encabezado real ──────────────────────────────
+    df_raw = pd.read_excel(archivo, sheet_name=hoja, header=None)
+
+    header_row = None
+    for i, row in df_raw.iterrows():
+        if 'CodProd' in row.astype(str).values:
+            header_row = i
+            break
+
+    if header_row is None:
+        # Fallback: usar la primera fila como encabezado
+        df = pd.read_excel(archivo, sheet_name=hoja)
+    else:
+        df = pd.read_excel(archivo, sheet_name=hoja, header=header_row)
+
+    # ── Limpieza de datos del pivot ───────────────────────────────────────────
+    # 1. Reemplazar "(en blanco)" por NaN
+    df = df.replace("(en blanco)", None)
+
+    # 2. Eliminar filas sin CodProd
+    if 'CodProd' in df.columns:
+        df = df.dropna(subset=['CodProd'])
+
+        # 3. Eliminar filas de totales generadas por la tabla dinámica
+        df = df[~df['CodProd'].astype(str).str.contains('Total', na=False)]
+
+    df = df.reset_index(drop=True)
+    return df
+
+
 def cargar_excel_con_selector_hoja(archivo, tipo_cubo: str, key_prefix: str = ""):
     """
     Carga un archivo Excel permitiendo seleccionar la hoja si hay múltiples.
-    Usa Streamlit para la interacción con el usuario.
-    
+    Usa cache.cargar_excel para cachear la lectura por hash del archivo.
+
     Args:
         archivo: Archivo subido por st.file_uploader
         tipo_cubo (str): Tipo de cubo ('requisiciones', 'compras', 'ventas', 'inventario')
         key_prefix (str): Prefijo único para los widgets de Streamlit
-    
+
     Returns:
         pd.DataFrame: DataFrame cargado o None si hay error
     """
     import streamlit as st
-    
+
     try:
-        # Leer todas las hojas del archivo
+        # Calcular hash del archivo para cache invalidation
+        file_hash = hashlib.md5(archivo.getvalue()).hexdigest()
+
+        # Leer hojas disponibles
         xls = pd.ExcelFile(archivo)
         hojas_disponibles = xls.sheet_names
-        
+
         # Si solo hay una hoja, cargarla directamente
         if len(hojas_disponibles) == 1:
-            df = pd.read_excel(archivo, sheet_name=hojas_disponibles[0])
-            st.info(f"📄 Hoja cargada automáticamente: **{hojas_disponibles[0]}**")
+            hoja_seleccionada = hojas_disponibles[0]
+            df = _cache.cargar_excel(archivo, file_hash, tipo_cubo, hoja_seleccionada)
+            st.info(f"📄 Hoja cargada automáticamente: **{hoja_seleccionada}**")
             return df
-        
+
         # Si hay múltiples hojas, mostrar selector
         st.info(f"📋 El archivo tiene {len(hojas_disponibles)} hojas. Selecciona la hoja correcta:")
-        
+
         hoja_seleccionada = st.selectbox(
             "Selecciona la hoja:",
             options=hojas_disponibles,
             key=f"{key_prefix}_selector_hoja_{tipo_cubo}"
         )
-        
-        # Cargar la hoja seleccionada
-        df = pd.read_excel(archivo, sheet_name=hoja_seleccionada)
-        
-        # Mostrar preview
+
+        df = _cache.cargar_excel(archivo, file_hash, tipo_cubo, hoja_seleccionada)
+
         with st.expander(f"👁️ Preview de '{hoja_seleccionada}' (primeras 5 filas)"):
             st.dataframe(df.head(5), width='stretch')
             st.caption(f"📊 Total: {len(df)} filas, {len(df.columns)} columnas")
-        
+
         return df
-        
+
     except Exception as e:
+        import streamlit as st
         st.error(f"❌ Error al leer el archivo Excel: {str(e)}")
         return None
 

@@ -88,10 +88,11 @@ Copia `dist\AppKS.exe` a la raíz del proyecto tras la compilación.
 
 | Módulo | Estado |
 |---|---|
-| Requisiciones |  Operativo |
-| Compras |  Operativo |
-| Ventas |  En desarrollo |
-| Inventario |  En desarrollo |
+| Requisiciones | Operativo |
+| Compras | Operativo |
+| Análisis Stock | Operativo |
+| Ventas | En desarrollo |
+| Inventario | En desarrollo |
 
 ---
 
@@ -106,18 +107,22 @@ Copia `dist\AppKS.exe` a la raíz del proyecto tras la compilación.
 
 ## Estado actual
 
-**v1.5.2**
+**v1.6.1**
 
 - Arquitectura modular por servicios
 - UPSERT inteligente en compras
 - Carga idempotente (no duplica al recargar)
-- Sincronización automática requisiciones  compras
+- Control de versión por hash MD5 en cubos de ventas e inventario
+- Sincronización automática requisiciones → compras con validación temporal correcta
 - Migraciones de esquema automáticas
+- Módulo Análisis Stock: cruce inventario × ventas, estado de stock y rotación
 - Edición segura desde la UI
 - Launcher .exe para usuarios finales
+- Invalidación completa de caché al eliminar cubos (tablas raw + hashes + session state)
 
 ---
 
 ## Autor
 
-Proyecto interno de gestión operativa  KS Seguridad Industrial, Sucursal Talca.
+Cristian Salas - Proyecto interno de gestión operativa  KS Seguridad Industrial, Sucursal Talca.
+Desarrollado con IA (Claude Sonnet y ChatGPT) 

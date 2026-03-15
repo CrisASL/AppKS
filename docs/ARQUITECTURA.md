@@ -84,27 +84,76 @@ AppKS/
 
 ### Tablas principales
 
-| Tabla | Descripción | Clave única |
+| Tabla | Módulo | Descripción | Clave única |
+|---|---|---|---|
+| `requisiciones` | `database.py` | Solicitudes de compra por producto | `(numreq, codprod)` |
+| `historial_cambios` | `database.py` | Auditoría de ediciones en requisiciones | — |
+| `log_eliminaciones` | `database.py` | Log de eliminaciones (soft-delete) | — |
+| `configuracion` | `database.py` | Pares clave-valor del sistema + hashes MD5 | `clave` |
+| `cargas_diarias` | `database.py` | Auditoría de cargas de cubos | — |
+| `cubo_ventas_raw` | `database.py` | Cubo de ventas persistido (JSON) | — |
+| `cubo_inventario_raw` | `database.py` | Cubo de inventario persistido (JSON) | — |
+| `cubo_compras_raw` | `database.py` | Cubo de compras persistido (JSON) | — |
+| `cubo_requisiciones_raw` | `database.py` | Cubo de requisiciones persistido (JSON) | — |
+| `compras` | `compras_service.py` | Órdenes de compra (cubo Softland) | `(num_oc, codprod)` |
+| `gestion` | `compras_service.py` | Seguimiento extendido vinculado a compras | `(numreq, codprod)` |
+| `archivos_cargados` | `ventas_inventario_service.py` | Control de hash MD5 por cubo | `nombre_cubo` |
+
+### Índices
+
+| Índice | Tabla | Columnas |
 |---|---|---|
-| `requisiciones` | Solicitudes de compra por producto | `(numreq, codprod)` |
-| `compras` | Órdenes de compra (cubo Softland) | `(num_oc, codprod)` |
-| `cubos_raw` | Datos crudos de cubos Excel persistidos | — |
-| `cargas_diarias` | Auditoría de cargas de cubos | — |
-| `archivos_cargados` | Control de hash MD5 por cubo | `nombre_cubo` |
-| `historial_cambios` | Auditoría de ediciones en requisiciones | — |
-| `configuracion` | Pares clave-valor del sistema | `clave` |
+| `idx_requisiciones_numreq` | `requisiciones` | `numreq` |
+| `idx_requisiciones_codprod` | `requisiciones` | `codprod` |
+| `idx_requisiciones_estado` | `requisiciones` | `estado` |
+| `idx_requisiciones_oc` | `requisiciones` | `oc` |
+| `idx_requisiciones_fecha_oc` | `requisiciones` | `fecha_oc` |
+| `idx_historial_requisicion` | `historial_cambios` | `requisicion_id` |
+| `idx_historial_req_fecha` ⭐ | `historial_cambios` | `(requisicion_id, fecha_cambio DESC)` |
+| `idx_cargas_fecha` | `cargas_diarias` | `fecha` |
+| `idx_compras_num_oc` | `compras` | `num_oc` |
+| `idx_compras_codprod` | `compras` | `codprod` |
+| `idx_compras_oc_codprod` | `compras` | `(num_oc, codprod)` |
+| `idx_compras_fecha_oc` | `compras` | `fecha_oc` |
+| `idx_compras_estado` | `compras` | `estado` |
+| `idx_compras_proveedor` | `compras` | `proveedor` |
+| `idx_gestion_numreq` | `gestion` | `numreq` |
+| `idx_gestion_codprod` | `gestion` | `codprod` |
+| `idx_gestion_oc` | `gestion` | `oc` |
+| `idx_gestion_oc_codprod` | `gestion` | `(oc, codprod)` |
+| `idx_gestion_estado` | `gestion` | `estado` |
+
+> ⭐ Índice compuesto agregado en v1.7.0. Cubre `obtener_historial()` con index-only scan.
 
 ### Triggers
 
 | Trigger | Tabla | Acción |
 |---|---|---|
-| `calcular_saldo_insert` | `requisiciones` | Calcula `saldo_pendiente` al insertar |
-| `calcular_saldo_update` | `requisiciones` | Recalcula `saldo_pendiente` al actualizar |
-| `auditoria_cambios` | `requisiciones` | Registra ediciones en `historial_cambios` |
+| `registrar_cambio_estado` | `requisiciones` | Inserta en `historial_cambios` al cambiar `estado` |
+| `registrar_cambio_proveedor` | `requisiciones` | Inserta en `historial_cambios` al cambiar `proveedor` |
+| `registrar_cambio_oc` | `requisiciones` | Inserta en `historial_cambios` al cambiar `oc` |
+| `registrar_cambio_cant_recibida` | `requisiciones` | Inserta en `historial_cambios` al cambiar `cant_recibida` |
+| `actualizar_fecha_modificacion` | `requisiciones` | Actualiza `fecha_modificacion` en cada UPDATE |
+| `calcular_saldo_pendiente_insert` | `requisiciones` | Calcula `saldo_pendiente` al insertar |
+| `calcular_saldo_pendiente_update` | `requisiciones` | Recalcula `saldo_pendiente` al actualizar |
+| `calcular_total_linea_insert` | `compras` | Calcula `total_linea` al insertar |
+| `calcular_total_linea_update` | `compras` | Recalcula `total_linea` al actualizar |
+| `calcular_saldo_gestion_insert` | `gestion` | Calcula `saldo` al insertar |
+| `calcular_saldo_gestion_update` | `gestion` | Recalcula `saldo` al actualizar |
+| `actualizar_fecha_mod_gestion` | `gestion` | Actualiza `fecha_modificacion` en cada UPDATE |
 
 ---
 
 ## 📦 Módulos y Servicios
+
+### `app/database.py`
+
+- CRUD completo para `requisiciones`, `historial_cambios`, `cargas_diarias` y tablas raw
+- Inicialización de esquema, índices y triggers al arrancar
+- **`actualizar_requisiciones_desde_compras()`**: sincronización REQ→OC mediante un único `UPDATE ... WHERE EXISTS` con subconsultas correlacionadas y `julianday()` para aritmética de fechas (ventana 0–90 días, cantidad OC ≥ 80% de REQ, selecciona OC más cercana en el tiempo)
+- **`cargar_requisiciones_desde_cubo()`**: `INSERT OR IGNORE` con `UNIQUE(numreq, codprod)`; sin pre-SELECT de tabla completa
+- Migraciones idempotentes: `migrar_base_datos_existente()`, ejecutable múltiples veces al arrancar
+- Limpieza de cubos: `limpiar_cubo_*()` elimina tablas operacionales + raw + hashes
 
 ### `app/modules/analisis_stock/`
 
@@ -124,6 +173,8 @@ Cruce entre cubo de Inventario y cubo de Ventas histórico para KS Talca.
 
 - **UPSERT inteligente** con detección de cambios (no actualiza si los datos no cambian)
 - Clave compuesta `(num_oc, codprod)` para evitar duplicados
+- Lookup de existencia por índice (`SELECT 1 ... LIMIT 1`) en lugar de pre-carga completa de la tabla
+- **`actualizar_gestion_desde_compras()`**: sincronización con un único `UPDATE gestion SET ... FROM compras c WHERE c.num_oc = gestion.oc AND c.codprod = gestion.codprod` usando `idx_compras_oc_codprod`
 - Migración automática (añade columnas nuevas en BD existentes)
 - Métricas de carga: insertados / actualizados / sin cambios
 
@@ -168,14 +219,18 @@ Excel (Softland ERP)
 
 | Patrón | Dónde |
 |---|---|
-| UPSERT idempotente | `compras_service.py` |
-| Control de versión por hash | `ventas_inventario_service.py`, `database.py` |
+| Carga idempotente con `INSERT OR IGNORE` | `database.py` → `cargar_requisiciones_desde_cubo()` |
+| UPSERT inteligente con detección de cambios | `compras_service.py` → `cargar_compras_desde_dataframe()` |
+| Control de versión por hash MD5 | `ventas_inventario_service.py`, `database.py` |
+| Sincronización REQ→OC pure SQL (`UPDATE...WHERE EXISTS`, `julianday()`) | `database.py` → `actualizar_requisiciones_desde_compras()` |
+| Sincronización gestion→compras con JOIN único (`UPDATE...FROM`) | `compras_service.py` → `actualizar_gestion_desde_compras()` |
 | Context manager para conexiones | Todos los módulos de BD |
-| Migraciones incrementales | `database.py` → `migrar_base_datos_existente()` |
+| Migraciones incrementales idempotentes | `database.py` → `migrar_base_datos_existente()` |
 | Session state para persistencia de UI | `main.py` |
 | Separación service / view | `modules/analisis_stock/` |
 | Invalidación de caché en limpieza | `main.py` → `st.cache_data.clear()` + loop `session_state` + `st.rerun()` |
 | Conteo real sin caché | `main.py` → `_contar_registros_db(tabla)` via `sqlite3` directo |
+| Edición segura en 4 capas | UI → `utils.py` → `CAMPOS_EDITABLES_UI` (backend) → triggers SQL |
 
 ---
 

@@ -492,15 +492,80 @@ Corregir el algoritmo de sincronización REQ→OC e implementar una invalidació
 
 ---
 
+## 🔹 v1.7.0 – Optimizaciones SQLite (Pure-SQL Sync)
+
+### 🎯 Objetivo
+Eliminar round-trips Python por fila y pre-SELECTs de tabla completa en los flujos críticos de sincronización y carga, delegando la lógica al motor SQLite.
+
+### 🏗️ Cambios Implementados
+
+#### 1. `actualizar_requisiciones_desde_compras()` reescrita (`database.py`)
+
+**Antes**:
+- Cargaba `requisiciones` y `compras` completas en DataFrames
+- Loop Python sobre cada fila REQ → filtros Pandas → un `UPDATE` por fila (N round-trips)
+
+**Después**:
+- Un único `UPDATE requisiciones SET ... WHERE EXISTS (SELECT 1 FROM compras WHERE ...)` con subconsultas correlacionadas
+- `julianday()` para aritmética de fechas dentro de SQLite (`0 ≤ diff ≤ 90` días)
+- Cantidad OC ≥ 80% de REQ; selecciona OC con mínima diferencia temporal
+- Elimina la dependencia de Pandas en este path
+
+#### 2. `actualizar_gestion_desde_compras()` reescrita (`compras_service.py`)
+
+**Antes**:
+- Cinco subconsultas correlacionadas independientes, cada una re-escaneando `compras` por separado
+
+**Después**:
+- `UPDATE gestion SET col1 = c.col1, col2 = c.col2, ... FROM compras c WHERE c.num_oc = gestion.oc AND c.codprod = gestion.codprod`
+- Un único JOIN pass usando el índice `idx_compras_oc_codprod`
+
+#### 3. Pre-SELECT eliminado en `cargar_requisiciones_desde_cubo()` (`database.py`)
+
+**Antes**:
+- `SELECT numreq, codprod FROM requisiciones` (full table scan → Python set)
+- Guard `if (numreq, codprod) in claves_existentes` + `claves_existentes.add(...)`
+
+**Después**:
+- `INSERT OR IGNORE` ya garantiza `UNIQUE(numreq, codprod)`
+- `cursor.rowcount` clasifica el resultado correctamente sin pre-carga
+
+#### 4. Pre-SELECT eliminado en `cargar_compras_desde_dataframe()` (`compras_service.py`)
+
+**Antes**:
+- `SELECT num_oc, codprod FROM compras` (full table scan → Python set)
+- Mantenimiento de set en memoria por cada fila procesada
+
+**Después**:
+- `SELECT 1 FROM compras WHERE num_oc = ? AND codprod = ? LIMIT 1` por fila
+- O(log n) lookup por índice `idx_compras_oc_codprod`
+- Preserva flag `existe_previamente` para clasificar INSERT vs UPDATE en métricas
+
+#### 5. Nuevo índice compuesto en `historial_cambios` (`database.py`)
+
+- `CREATE INDEX IF NOT EXISTS idx_historial_req_fecha ON historial_cambios(requisicion_id, fecha_cambio DESC)`
+- Cubre la query de `obtener_historial()` (`WHERE requisicion_id = ? ORDER BY fecha_cambio DESC`) con index-only scan
+- El índice previo `idx_historial_requisicion` se mantiene
+
+### 📈 Resultado
+✅ Sync REQ→OC: N round-trips Python → 1 statement SQL  
+✅ Sync gestion→compras: 5 scans → 1 JOIN pass  
+✅ Carga requisiciones: full pre-SELECT eliminado  
+✅ Carga compras: full pre-SELECT → lookup puntual O(log n)  
+✅ Historial: index-only scan en consultas por requisición  
+
+---
+
 # 📍 Estado Actual del Proyecto
 
 El proyecto se encuentra actualmente en la versión:
 
-## 🔹 **v1.6.1**
+## 🔹 **v1.7.0**
 
 Sistema completo de gestión de requisiciones, compras y análisis de stock con:
 - Seguimiento avanzado de órdenes de compra con filtros de texto
-- Sincronización automática entre requisiciones y compras con validación temporal correcta
+- Sincronización automática REQ→OC: pure SQL (`UPDATE...WHERE EXISTS`, `julianday()`), ventana 0–90 días, sin loops Python
+- Sincronización gestion→compras: `UPDATE...FROM` en un único JOIN pass
 - Módulo de Análisis Stock: estado de stock y rotación de productos
 - Persistencia de los 4 cubos con control por hash MD5
 - Invalidación completa de caché al eliminar cubos (tablas raw + hashes + session state)

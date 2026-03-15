@@ -83,8 +83,11 @@ El servicio de compras detecta cambios antes de actualizar: solo ejecuta `UPDATE
 **Control de versión por hash MD5**
 Los cubos de ventas e inventario registran su hash en SQLite. Si el archivo no cambió, se carga desde la base de datos sin reprocesar el Excel.
 
-**Sincronización automática REQ → OC**
-Al cargar el cubo de compras, el sistema actualiza automáticamente las requisiciones con el proveedor, número y fecha de la OC más cercana en el tiempo (ventana de 0–90 días, ordenada por mínima diferencia temporal).
+**Sincronización automática REQ → OC (pure SQL)**
+Al cargar el cubo de compras, el sistema actualiza automáticamente las requisiciones mediante un único `UPDATE ... WHERE EXISTS` con subconsultas correlacionadas. Usa `julianday()` para aritmética de fechas dentro de SQLite (ventana 0–90 días, OC con cantidad ≥ 80% de la REQ, selecciona la más cercana en el tiempo). Sin loops Python ni round-trips por fila.
+
+**Sincronización gestion → compras (JOIN único)**
+`actualizar_gestion_desde_compras()` ejecuta un solo `UPDATE gestion SET ... FROM compras c WHERE c.num_oc = gestion.oc AND c.codprod = gestion.codprod`, aprovechando el índice `idx_compras_oc_codprod` en un único paso.
 
 **Launcher minimalista**
 En lugar de empaquetar Streamlit completo (~99 MB), el `.exe` es un launcher de ~8 MB que invoca `streamlit run` en el entorno virtual del proyecto vía `subprocess`. Más simple, más mantenible.
@@ -136,13 +139,15 @@ build.bat
 
 ## Estado actual
 
-**v1.6.1** – En fase de validación
+**v1.7.0** – En fase de validación
 
 - Arquitectura modular por servicios (UI / Services / DAL)
 - Carga idempotente con clave compuesta para requisiciones y compras
 - UPSERT inteligente con detección de cambios
 - Control de versión por hash MD5 en cubos de ventas e inventario
-- Sincronización automática REQ → OC con validación temporal
+- Sincronización automática REQ → OC: pure SQL con `UPDATE ... WHERE EXISTS`, `julianday()` para aritmética de fechas, ventana 0–90 días
+- Sincronización gestion → compras: `UPDATE gestion SET ... FROM compras` en un único JOIN pass
+- Nuevo índice compuesto `idx_historial_req_fecha` en `historial_cambios(requisicion_id, fecha_cambio DESC)`
 - Módulo Análisis Stock: estado de stock y rotación de productos
 - Edición segura inline en 4 capas (UI → validación → backend → triggers SQL)
 - Migraciones de esquema automáticas e idempotentes

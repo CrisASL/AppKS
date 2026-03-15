@@ -1108,11 +1108,11 @@ def pagina_seguimiento_oc():
                 st.session_state.filtro_buscar_producto = buscar_producto
 
             with col_txt2:
-                # Búsqueda por observación (case-insensitive, null-safe)
+                # Búsqueda por observación (case-insensitive, null-safe, "comienza con")
                 buscar_observacion = st.text_input(
-                    "💬 Buscar en observaciones:",
+                    "💬 Observación comienza con:",
                     value=st.session_state.filtro_observacion,
-                    help="Filtra registros cuya observación contenga este texto",
+                    help="Filtra registros cuya observación comience con este texto (equivalente a LIKE 'texto%')",
                     key="txt_observacion",
                 )
                 st.session_state.filtro_observacion = buscar_observacion
@@ -1172,12 +1172,12 @@ def pagina_seguimiento_oc():
             # Ejecutar query y obtener datos
             df_compras = pd.read_sql_query(query, conn, params=params)
 
-            # Filtro por observación (pandas, case-insensitive, null-safe)
+            # Filtro por observación (pandas, case-insensitive, null-safe, "comienza con")
             if buscar_observacion:
                 df_compras = df_compras[
-                    df_compras["Observación"].str.contains(
-                        buscar_observacion, case=False, na=False
-                    )
+                    df_compras["Observación"]
+                    .str.lower()
+                    .str.startswith(buscar_observacion.lower(), na=False)
                 ]
 
             # Mostrar título de resultados

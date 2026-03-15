@@ -1802,28 +1802,38 @@ def limpiar_cubo_inventario() -> Tuple[bool, str]:
 
 def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
     """
-    Cruza requisiciones con órdenes de compra aplicando reglas de negocio estrictas.
+    Cruza requisiciones con órdenes de compra en dos pasos:
 
-    Reglas de matching (todas deben cumplirse):
-    1. codprod_req == codprod_oc
-    2. fecha_oc >= fecha_req  (la OC no puede ser anterior a la REQ)
-    3. fecha_oc <= fecha_req + 90 días  (ventana temporal máxima)
-    4. cantidad_oc >= cantidad_req * 0.8  (compatibilidad de cantidad)
+    Paso 1 — Proveedor de respaldo (sin restricciones de OC):
+        Para toda REQ cuyo codprod exista en compras, asigna el proveedor
+        de la compra más reciente (fecha_oc DESC). Solo toca el campo
+        proveedor; no modifica oc, fecha_oc ni estado_oc.
 
-    Selección: entre candidatas válidas se elige la de fecha_oc más cercana
-    posterior a la requisición (fecha_oc ASC).
-    Si no existe candidata válida, no se actualiza la REQ.
+    Paso 2 — Match completo REQ→OC (reglas estrictas):
+        Sobreescribe proveedor + oc + fecha_oc + estado_oc cuando la REQ
+        encuentra una OC que cumple todas las reglas:
+        1. codprod_req == codprod_oc
+        2. fecha_oc >= fecha_req
+        3. fecha_oc <= fecha_req + 90 días
+        4. cantidad_oc >= cantidad_req * 0.8
+        Selección: OC con fecha_oc más cercana posterior a la REQ (ASC).
+
+    Resultado final:
+        - REQ con OC válida  → proveedor + oc + fecha_oc + estado_oc completos
+        - REQ sin OC válida  → solo proveedor (el más reciente del producto)
+        - REQ sin codprod en compras → sin cambios
 
     Returns:
-        Tuple[bool, str, int]: (éxito, mensaje, cantidad_actualizados)
+        Tuple[bool, str, int]: (éxito, mensaje, cantidad_con_oc_asignada)
     """
     VENTANA_DIAS = 90
     FACTOR_CANTIDAD = 0.8
 
     try:
-        # Verificar existencia de tablas
         with get_db_connection() as conn:
             cursor = conn.cursor()
+
+            # Verificar existencia de tablas
             cursor.execute("""
                 SELECT name FROM sqlite_master
                 WHERE type='table' AND name IN ('requisiciones', 'compras')
@@ -1853,34 +1863,39 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
             if cursor.fetchone()[0] == 0:
                 return False, "ℹ️ No hay suficientes datos para el cruce", 0
 
-            # Contar cuántas requisiciones tendrán match antes de actualizar
-            cursor.execute(
-                """
-                SELECT COUNT(DISTINCT r.id)
-                FROM requisiciones r
-                WHERE r.fecha_requisicion IS NOT NULL
-                  AND r.fecha_requisicion != ''
-                  AND EXISTS (
-                      SELECT 1 FROM compras c
-                      WHERE c.codprod = r.codprod
-                        AND c.fecha_oc IS NOT NULL
-                        AND julianday(c.fecha_oc) >= julianday(r.fecha_requisicion)
-                        AND julianday(c.fecha_oc) <= julianday(r.fecha_requisicion) + :ventana
-                        AND c.cantidad_solicitada >= r.cantidad * :factor
-                  )
-            """,
-                {"ventana": VENTANA_DIAS, "factor": FACTOR_CANTIDAD},
-            )
-            actualizados_esperados = cursor.fetchone()[0]
+            # ------------------------------------------------------------------
+            # PASO 1: Proveedor de respaldo
+            # Asigna el proveedor más reciente del mismo codprod en compras,
+            # sin ninguna restricción de fecha ni cantidad.
+            # Solo actualiza si el codprod existe en compras y el proveedor
+            # encontrado no es NULL/vacío.
+            # ------------------------------------------------------------------
+            cursor.execute("""
+                UPDATE requisiciones
+                SET proveedor = (
+                    SELECT c.proveedor
+                    FROM compras c
+                    WHERE c.codprod = requisiciones.codprod
+                      AND c.proveedor IS NOT NULL
+                      AND c.proveedor != ''
+                    ORDER BY julianday(c.fecha_oc) DESC
+                    LIMIT 1
+                )
+                WHERE EXISTS (
+                    SELECT 1 FROM compras c
+                    WHERE c.codprod = requisiciones.codprod
+                      AND c.proveedor IS NOT NULL
+                      AND c.proveedor != ''
+                )
+            """)
+            con_proveedor = cursor.rowcount
 
-            if actualizados_esperados == 0:
-                return False, "ℹ️ No hay datos con fechas válidas para el cruce", 0
-
-            # Un solo UPDATE con subquery correlacionada:
-            # Para cada REQ selecciona la OC del mismo producto, dentro de la
+            # ------------------------------------------------------------------
+            # PASO 2: Match completo REQ→OC (sobreescribe paso 1 si hay match)
+            # Para cada REQ selecciona la OC del mismo producto dentro de la
             # ventana de 90 días y con cantidad >= 80%, ordenada por fecha_oc
-            # ascendente (la más cercana posterior a la REQ). julianday() hace
-            # la aritmética de fechas directamente en SQLite.
+            # ascendente (la más cercana posterior a la REQ).
+            # ------------------------------------------------------------------
             cursor.execute(
                 """
                 UPDATE requisiciones
@@ -1941,24 +1956,23 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
             """,
                 {"ventana": VENTANA_DIAS, "factor": FACTOR_CANTIDAD},
             )
-
-            actualizados = cursor.rowcount
-            sin_match = actualizados_esperados - actualizados
+            con_oc = cursor.rowcount
+            solo_proveedor = con_proveedor - con_oc
 
         invalidar_cache()
 
         mensaje = (
             f"✅ Cruce REQ→OC completado\n\n"
             f"📊 **Resultados:**\n"
-            f"- {actualizados} requisiciones actualizadas\n"
-            f"- {sin_match} requisiciones sin coincidencia válida\n\n"
-            f"**Criterios aplicados:**\n"
+            f"- {con_oc} requisiciones con OC asignada (proveedor + N°OC + fecha + estado)\n"
+            f"- {solo_proveedor} requisiciones sin OC válida (solo proveedor de respaldo)\n\n"
+            f"**Criterios de match OC:**\n"
             f"- ✓ Mismo producto (codprod)\n"
             f"- ✓ Ventana temporal: 0–{VENTANA_DIAS} días desde la REQ\n"
             f"- ✓ Cantidad OC ≥ {int(FACTOR_CANTIDAD * 100)}% de cantidad REQ\n"
             f"- ✓ Selección: OC más cercana posterior a la REQ"
         )
-        return True, mensaje, actualizados
+        return True, mensaje, con_oc
 
     except Exception as e:
         return False, f"❌ Error al cruzar requisiciones con compras: {str(e)}", 0

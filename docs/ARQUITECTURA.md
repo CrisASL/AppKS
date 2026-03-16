@@ -86,7 +86,7 @@ AppKS/
 
 | Tabla | Módulo | Descripción | Clave única |
 |---|---|---|---|
-| `requisiciones` | `database.py` | Solicitudes de compra por producto | `(numreq, codprod)` |
+| `requisiciones` | `database.py` | Solicitudes de compra por producto. Incluye `estado_req` y `estado_envio` (TEXT) | `(numreq, codprod)` |
 | `historial_cambios` | `database.py` | Auditoría de ediciones en requisiciones | — |
 | `log_eliminaciones` | `database.py` | Log de eliminaciones (soft-delete) | — |
 | `configuracion` | `database.py` | Pares clave-valor del sistema + hashes MD5 | `clave` |
@@ -230,7 +230,55 @@ Excel (Softland ERP)
 | Separación service / view | `modules/analisis_stock/` |
 | Invalidación de caché en limpieza | `main.py` → `st.cache_data.clear()` + loop `session_state` + `st.rerun()` |
 | Conteo real sin caché | `main.py` → `_contar_registros_db(tabla)` via `sqlite3` directo |
+| Override masivo de estado via session state | `main.py` → `estado_envio_override` / `st.rerun()` |
 | Edición segura en 4 capas | UI → `utils.py` → `CAMPOS_EDITABLES_UI` (backend) → triggers SQL |
+
+---
+
+## 📐 Convenciones de Columnas de Estado
+
+Las columnas que representan un estado editable por el usuario siguen el patrón `estado_* TEXT` en lugar de INTEGER/bool. Esto aplica actualmente a `estado_req` y `estado_envio` en la tabla `requisiciones`.
+
+### Por qué TEXT y no BOOLEAN/INTEGER
+
+| Aspecto | INTEGER (bool) | TEXT |
+|---|---|---|
+| AG Grid devuelve | `"true"` / `"false"` (string) | El mismo valor que se guardó |
+| pandas lee | requiere `.astype(bool)` | Listo para usar |
+| SQLite guarda | `0` / `1` | `'No Enviado'` / `'Enviado'` |
+| Conflictos de tipo | frecuentes en round-trip | ninguno |
+| Extensibilidad | solo dos valores | cualquier cantidad de estados |
+
+### Estructura del patrón
+
+```sql
+-- Schema
+estado_envio TEXT DEFAULT 'No Enviado'
+
+-- Migración idempotente
+IF "estado_envio" NOT IN columnas_existentes:
+    ALTER TABLE requisiciones ADD COLUMN estado_envio TEXT DEFAULT 'No Enviado'
+```
+
+```python
+# config.py
+ESTADOS_ENVIO = ["No Enviado", "Enviado"]  # primer elemento = default
+
+# utils.py – normalización al preparar el df
+df["estado_envio"] = df["estado_envio"].fillna("No Enviado").astype(str)
+
+# database.py – validación al guardar
+valor = valor if valor in config.ESTADOS_ENVIO else "No Enviado"
+```
+
+### Cómo agregar un nuevo estado o columna de estado
+
+1. Definir la constante en `config.py`: `ESTADOS_NUEVA = ["A", "B", "C"]`
+2. Agregar la columna en el schema `CREATE TABLE` de `database.py`
+3. Agregar el bloque de migración idempotente en `migrar_base_datos_existente()`
+4. Agregar la normalización en `preparar_df_para_edicion_segura()` en `utils.py`
+5. Agregar el bloque de validación en `actualizar_requisicion_desde_ui()` de `database.py`
+6. Configurar la columna en el AG Grid de `main.py` con `agSelectCellEditor` y `cellStyle` JsCode
 
 ---
 

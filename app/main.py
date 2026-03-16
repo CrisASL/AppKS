@@ -11,6 +11,8 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
 
+from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, JsCode
+
 # Importar módulos del proyecto
 from app import config
 from app import database as db
@@ -525,7 +527,7 @@ def seccion_carga_cubos():
 
 
 def pagina_dashboard():
-    """Página principal con KPIs y gráficos."""
+    """Página principal con KPIs operativos y gráficos de gestión de requisiciones."""
     st.title("📊 Dashboard - Gestión de Requisiciones")
 
     # Sección de carga de cubos
@@ -533,70 +535,98 @@ def pagina_dashboard():
 
     st.markdown("---")
 
-    # Si no hay datos, mostrar mensaje
+    # Si no hay datos cargados mostrar mensaje y salir
     if not st.session_state.datos_cargados:
         st.info("ℹ️ Carga los cubos Excel para ver el dashboard completo")
-
-        # Mostrar datos dummy/simulados
-        st.subheader("📈 Vista Previa (Datos Simulados)")
-        col1, col2, col3, col4 = st.columns(4)
-
-        with col1:
-            st.metric("REQ Pendientes", "15", "+3")
-        with col2:
-            st.metric("OC en Tránsito", "8", "-2")
-        with col3:
-            st.metric("Productos Críticos", "23", "+5")
-        with col4:
-            st.metric("Valor Total OC", "$12.5M", "+8%")
-
         return
 
-    # KPIs principales
+    # -------------------------------------------------------------------------
+    # FILTROS GLOBALES
+    # -------------------------------------------------------------------------
+    st.subheader("🔍 Filtros")
+
+    col_f1, col_f2, col_f3, col_f4 = st.columns([1, 1, 1, 1])
+
+    with col_f1:
+        fecha_desde = st.date_input(
+            "Desde",
+            value=None,
+            help="Filtrar desde esta fecha de requisición",
+            key="dash_fecha_desde",
+        )
+    with col_f2:
+        fecha_hasta = st.date_input(
+            "Hasta",
+            value=None,
+            help="Filtrar hasta esta fecha de requisición",
+            key="dash_fecha_hasta",
+        )
+    with col_f3:
+        filtro_numreq = st.text_input(
+            "N° Requisición",
+            value="",
+            help="Búsqueda parcial por número de requisición",
+            key="dash_numreq",
+        )
+    with col_f4:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("🔄 Limpiar", key="dash_limpiar", use_container_width=True):
+            st.rerun()
+
+    # Convertir fechas a string para pasarlas al backend
+    f_desde = str(fecha_desde) if fecha_desde else None
+    f_hasta = str(fecha_hasta) if fecha_hasta else None
+    f_numreq = filtro_numreq.strip() if filtro_numreq else None
+
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # KPIs PRINCIPALES
+    # -------------------------------------------------------------------------
     st.subheader("📊 Indicadores Principales")
 
-    stats = db.obtener_estadisticas_generales()
+    kpis = db.obtener_kpis_dashboard(
+        fecha_desde=f_desde,
+        fecha_hasta=f_hasta,
+        numreq=f_numreq,
+    )
 
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         st.metric(
             "REQ Pendientes",
-            stats["req_pendientes"],
-            help="Requisiciones con saldo pendiente > 0",
+            kpis["req_pendientes"],
+            help="Requisiciones sin OC, sin guía y sin observación registrada",
         )
-
     with col2:
         st.metric(
-            "OC en Tránsito",
-            stats["oc_transito"],
-            help="OC en estado: En Tránsito, Guía de Despacho o Recepción Parcial",
+            "OC Emitidas",
+            kpis["oc_emitidas"],
+            help="Requisiciones con número de OC asignado",
         )
-
     with col3:
         st.metric(
-            "Productos Pendientes",
-            stats["productos_pendientes"],
-            help="Productos únicos con requisiciones pendientes",
+            "OC Enviadas",
+            kpis["oc_enviadas"],
+            help="OC con estado de envío 'Enviado'",
         )
-
     with col4:
-        valor_formateado = utils.formatear_numero(
-            stats["valor_total_oc"], simbolo_moneda="$"
-        )
         st.metric(
-            "Valor Total OC",
-            valor_formateado,
-            help="Valor total de órdenes de compra activas",
+            "OC No Enviadas",
+            kpis["oc_no_enviadas"],
+            help="OC emitidas con estado de envío 'No Enviado'",
         )
 
     st.markdown("---")
 
-    # Gráficos
+    # -------------------------------------------------------------------------
+    # GRÁFICO DE ESTADO DE OC  +  TOP 10 PRODUCTOS (ÚLTIMO MES)
+    # -------------------------------------------------------------------------
     col_left, col_right = st.columns(2)
 
     with col_left:
-        st.subheader("📊 Requisiciones por Estado")
+        st.subheader("📊 Estado de OC")
 
         df_estados = db.obtener_distribucion_estados()
 
@@ -610,34 +640,92 @@ def pagina_dashboard():
                 hole=0.4,
             )
             fig.update_traces(textposition="inside", textinfo="percent+label")
-            fig.update_layout(showlegend=True, height=400)
-            st.plotly_chart(fig, width="stretch")
+            fig.update_layout(showlegend=True, height=380, margin=dict(t=20, b=10))
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Tabla explicativa de estados
+            with st.expander("ℹ️ Significado de estados"):
+                st.markdown(
+                    """
+| Estado | Significado |
+|---|---|
+| Pendiente | REQ sin OC asignada |
+| OC Emitida | OC generada, en proceso de envío |
+| OC Enviada | OC enviada al proveedor (campo OC Enviada = ✓) |
+| En Tránsito | Mercadería en camino |
+| Guía de Despacho | Despacho confirmado, pendiente recepción |
+| Recepción Parcial | Recibida parcialmente |
+| Recepción Completa | REQ totalmente cerrada |
+"""
+                )
         else:
             st.info("No hay datos de requisiciones aún")
 
     with col_right:
-        st.subheader("🏆 Top 10 Productos Solicitados")
+        st.subheader("🏆 Top 10 Productos — Último Mes")
 
-        df_productos = db.obtener_productos_mas_solicitados(10)
+        df_productos = db.obtener_top_productos_ultimo_mes(10)
 
         if not df_productos.empty:
-            fig = px.bar(
+            etiqueta_y = "desprod" if "desprod" in df_productos.columns else "codprod"
+            fig2 = px.bar(
                 df_productos,
                 x="cantidad_total",
-                y="codprod",
+                y=etiqueta_y,
                 orientation="h",
                 color="cantidad_total",
                 color_continuous_scale="Blues",
-                labels={"cantidad_total": "Cantidad", "codprod": "Producto"},
+                labels={"cantidad_total": "Cantidad", etiqueta_y: "Producto"},
             )
-            fig.update_layout(showlegend=False, height=400)
-            st.plotly_chart(fig, width="stretch")
+            fig2.update_layout(
+                showlegend=False,
+                height=380,
+                margin=dict(t=20, b=10),
+                yaxis={"categoryorder": "total ascending"},
+            )
+            st.plotly_chart(fig2, use_container_width=True)
         else:
-            st.info("No hay datos de productos aún")
+            st.info("No hay requisiciones en los últimos 30 días")
 
     st.markdown("---")
 
-    # Tabla de productos críticos
+    # -------------------------------------------------------------------------
+    # TABLA DE REQ PENDIENTES
+    # -------------------------------------------------------------------------
+    st.subheader("📋 Requisiciones Pendientes")
+
+    df_pendientes = db.obtener_req_pendientes_df(
+        fecha_desde=f_desde,
+        fecha_hasta=f_hasta,
+        numreq=f_numreq,
+    )
+
+    if df_pendientes.empty:
+        st.success("✅ No hay requisiciones pendientes con los filtros actuales")
+    else:
+        st.caption(f"{len(df_pendientes)} requisición(es) sin OC, guía ni observación")
+        st.dataframe(
+            df_pendientes,
+            use_container_width=True,
+            hide_index=True,
+            height=300,
+            column_config={
+                "numreq": st.column_config.TextColumn("N° REQ"),
+                "codprod": st.column_config.TextColumn("Código"),
+                "desprod": st.column_config.TextColumn("Descripción"),
+                "cantidad": st.column_config.NumberColumn("Cantidad", format="%d"),
+                "fecha_requisicion": st.column_config.DateColumn(
+                    "Fecha REQ", format="DD/MM/YYYY"
+                ),
+                "proveedor": st.column_config.TextColumn("Proveedor"),
+            },
+        )
+
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # PRODUCTOS CON STOCK CRÍTICO
+    # -------------------------------------------------------------------------
     if st.session_state.cubo_inventario is not None:
         st.subheader("⚠️ Productos con Stock Crítico")
 
@@ -646,11 +734,16 @@ def pagina_dashboard():
         if not df_criticos.empty:
             st.dataframe(
                 df_criticos,
-                width="stretch",
+                use_container_width=True,
+                hide_index=True,
                 column_config={
-                    "CodProd": "Código Producto",
-                    "KS TALCA": "Stock Talca",
-                    "Total general": "Stock Total",
+                    "CodProd": st.column_config.TextColumn("Código Producto"),
+                    "KS TALCA": st.column_config.NumberColumn(
+                        "Stock Talca", format="%d"
+                    ),
+                    "Total general": st.column_config.NumberColumn(
+                        "Stock Total", format="%d"
+                    ),
                     "CostoUnitario": st.column_config.NumberColumn(
                         "Costo Unitario", format="$%d"
                     ),
@@ -717,8 +810,13 @@ def pagina_gestion_requisiciones():
 
 
 def tabla_listado_requisiciones():
-    """Tabla EDITABLE con listado de requisiciones y filtros."""
-    st.subheader("📋 Listado de Requisiciones (Editable)")
+    """Tabla EDITABLE con listado de requisiciones y filtros (AG Grid)."""
+
+    # ── Título del panel ────────────────────────────────────────────────────
+    st.markdown(
+        "<h2 style='margin-bottom:4px'>Panel de Gestión de Requisiciones</h2>",
+        unsafe_allow_html=True,
+    )
 
     # Inicializar filtros en session_state si no existen
     if "filtro_req_estado" not in st.session_state:
@@ -733,6 +831,14 @@ def tabla_listado_requisiciones():
         st.session_state.filtro_req_numreq = ""
     if "filtro_req_codprod" not in st.session_state:
         st.session_state.filtro_req_codprod = ""
+    if "filtro_req_desprod" not in st.session_state:
+        st.session_state.filtro_req_desprod = ""
+    if "filtro_req_proveedor" not in st.session_state:
+        st.session_state.filtro_req_proveedor = []
+    if "oc_enviada_override" not in st.session_state:
+        st.session_state.oc_enviada_override = None
+    if "estado_envio_override" not in st.session_state:
+        st.session_state.estado_envio_override = None
 
     # Filtros
     with st.expander("🔍 Filtros", expanded=False):
@@ -789,7 +895,38 @@ def tabla_listado_requisiciones():
         )
         st.session_state.filtro_req_codprod = filtro_codprod
 
-        # Botón para limpiar filtros
+        col_txt2, col_txt3 = st.columns(2)
+
+        with col_txt2:
+            filtro_desprod = st.text_input(
+                "🔎 Buscar Descripción Producto",
+                value=st.session_state.filtro_req_desprod,
+                help="Filtra por nombre/descripción del producto (búsqueda parcial)",
+                key="txt_desprod_req",
+            )
+            st.session_state.filtro_req_desprod = filtro_desprod
+
+        with col_txt3:
+            df_req_todos = db.obtener_requisiciones({})
+            proveedores_disponibles = (
+                sorted(df_req_todos["proveedor"].dropna().unique().tolist())
+                if not df_req_todos.empty
+                else []
+            )
+
+            filtro_proveedor = st.multiselect(
+                "🏢 Proveedor",
+                options=proveedores_disponibles,
+                default=[
+                    p
+                    for p in st.session_state.filtro_req_proveedor
+                    if p in proveedores_disponibles
+                ],
+                help="Filtra por uno o más proveedores",
+                key="multi_proveedor_req",
+            )
+            st.session_state.filtro_req_proveedor = filtro_proveedor
+
         if st.button(
             "🔄 Limpiar Filtros", type="secondary", key="btn_limpiar_filtros_req"
         ):
@@ -799,6 +936,8 @@ def tabla_listado_requisiciones():
             st.session_state.filtro_req_solo_pendientes = False
             st.session_state.filtro_req_numreq = ""
             st.session_state.filtro_req_codprod = ""
+            st.session_state.filtro_req_desprod = ""
+            st.session_state.filtro_req_proveedor = []
             st.rerun()
 
     # Construir filtros para consulta
@@ -829,52 +968,351 @@ def tabla_listado_requisiciones():
         st.info("No se encontraron requisiciones con los filtros aplicados")
         return
 
-    # Preparar DataFrame para edición segura
+    # Filtros pandas post-consulta
+    if filtro_desprod:
+        df_requisiciones = df_requisiciones[
+            df_requisiciones["desprod"].str.contains(
+                filtro_desprod, case=False, na=False
+            )
+        ]
+
+    if filtro_proveedor:
+        df_requisiciones = df_requisiciones[
+            df_requisiciones["proveedor"].isin(filtro_proveedor)
+        ]
+
+    if df_requisiciones.empty:
+        st.info("No se encontraron requisiciones con los filtros aplicados")
+        return
+
+    # ── Enriquecer estado_req desde cubo de compras ─────────────────────────
+    # Prioridad: 1) estado_linea del cubo compras  2) estado_req en SQLite  3) "Pendiente"
+    try:
+        df_compras_cache = get_table("compras")
+        if df_compras_cache is not None and not df_compras_cache.empty:
+            # Tomar solo num_oc + estado_linea, un estado por OC
+            df_estado_compras = (
+                df_compras_cache[["num_oc", "estado_linea"]]
+                .dropna(subset=["num_oc"])
+                .drop_duplicates(subset=["num_oc"], keep="last")
+                .rename(columns={"estado_linea": "_estado_compras"})
+            )
+            df_requisiciones = df_requisiciones.merge(
+                df_estado_compras,
+                left_on="oc",
+                right_on="num_oc",
+                how="left",
+            )
+            # Aplicar prioridad: compras > SQLite > "Pendiente"
+            _tiene_compras = df_requisiciones["_estado_compras"].notna() & (
+                df_requisiciones["_estado_compras"].astype(str).str.strip() != ""
+            )
+            _tiene_sqlite = (
+                df_requisiciones["estado_req"].notna()
+                & (df_requisiciones["estado_req"].astype(str).str.strip() != "")
+                & (df_requisiciones["estado_req"] != "Pendiente")
+            )
+            df_requisiciones["estado_req"] = (
+                df_requisiciones["_estado_compras"]
+                .where(_tiene_compras, other=None)
+                .fillna(df_requisiciones["estado_req"].where(_tiene_sqlite, other=None))
+                .fillna("Pendiente")
+            )
+            # Limpiar columnas auxiliares del merge
+            df_requisiciones = df_requisiciones.drop(
+                columns=["_estado_compras", "num_oc"], errors="ignore"
+            )
+    except Exception:
+        pass  # Si falla el enriquecimiento, continuar con el valor de SQLite
+
+    # ── Resumen operativo ───────────────────────────────────────────────────
+    df_m = df_requisiciones.copy()
+    if "estado_envio" not in df_m.columns:
+        df_m["estado_envio"] = "No Enviado"
+    df_m["estado_envio"] = df_m["estado_envio"].fillna("No Enviado").astype(str)
+
+    _oc_vacia = df_m["oc"].isna() | (df_m["oc"].astype(str).str.strip() == "")
+    _guia_vacia = df_m["n_guia"].isna() | (df_m["n_guia"].astype(str).str.strip() == "")
+    _obs_vacia = df_m["observacion"].isna() | (
+        df_m["observacion"].astype(str).str.strip() == ""
+    )
+    n_pendientes = int((_oc_vacia & _guia_vacia & _obs_vacia).sum())
+    n_oc_emitidas = int((~_oc_vacia).sum())
+    n_oc_enviadas = int((df_m["estado_envio"] == "Enviado").sum())
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric(
+        "⏳ REQ Pendientes", n_pendientes, help="Sin OC, sin guía y sin observación"
+    )
+    m2.metric("📄 OC Emitidas", n_oc_emitidas, help="Con número de OC asignado")
+    m3.metric("✅ OC Enviadas", n_oc_enviadas, help="Con estado de envío 'Enviado'")
+
+    st.markdown("---")
+
+    # ── Guardar estado original para comparación al guardar ────────────────
     df_preparado = utils.preparar_df_para_edicion_segura(df_requisiciones)
 
-    # Guardar estado original en session_state (solo la primera vez o cuando hay recarga)
     if "df_req_original" not in st.session_state or st.session_state.get(
         "reload_req_data", False
     ):
         st.session_state.df_req_original = df_preparado.copy()
         st.session_state.reload_req_data = False
 
-    # Mostrar estadísticas
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Total Requisiciones", len(df_preparado))
-    with col2:
-        pendientes = len(df_preparado[df_preparado["saldo_pendiente"] > 0])
-        st.metric("Con Saldo Pendiente", pendientes)
-    with col3:
-        completas = len(df_preparado[df_preparado["estado_oc"] == "Recepción Completa"])
-        st.metric("Completas", completas)
+    # ── Preparar DataFrame para AG Grid ────────────────────────────────────
+    COLUMNAS_VISIBLES = [
+        "numreq",
+        "fecha_requisicion",
+        "desprod",
+        "cantidad",
+        "oc",
+        "fecha_oc",
+        "proveedor",
+        "estado_envio",
+        "n_guia",
+        "estado_req",
+        "observacion",
+    ]
 
-    st.markdown("---")
+    # id se incluye oculto para identificar filas al guardar
+    cols_para_grid = ["id"] + [
+        c for c in COLUMNAS_VISIBLES if c in df_preparado.columns
+    ]
+    df_grid = df_preparado[cols_para_grid].copy()
 
-    # Información para el usuario sobre campos editables
-    st.info("""
-    💡 **Tabla Editable**: Haz doble clic en una celda para editarla
-    
-    ✅ **Campos editables**: Proveedor, N° OC, N° Guía, Fecha OC, Observaciones, Detalle
-    
-    🔒 **Campos protegidos**: ID, N° REQ, Código, Cantidad, Estado, Cant. Recibida, Saldo Pendiente
-    
-    Después de editar, haz clic en "💾 Guardar Cambios"
+    # estado_envio: asegurar string con valor por defecto
+    if "estado_envio" in df_grid.columns:
+        df_grid["estado_envio"] = (
+            df_grid["estado_envio"].fillna("No Enviado").astype(str)
+        )
+
+    # Aplicar override de "marcar todos como enviados / no enviados" si está activo
+    if st.session_state.get("estado_envio_override") is not None:
+        df_grid["estado_envio"] = st.session_state.estado_envio_override
+
+    # estado_req: asegurar string con valor por defecto
+    if "estado_req" in df_grid.columns:
+        df_grid["estado_req"] = df_grid["estado_req"].fillna("Pendiente").astype(str)
+
+    # ── Colores de estado_req via JS ────────────────────────────────────────
+    cell_style_estado = JsCode("""
+    function(params) {
+        var colores = {
+            'Pendiente':     { background: '#FFF8E1', color: '#E65100', fontWeight: '600' },
+            'Recepcionada':  { background: '#E8F5E9', color: '#2E7D32', fontWeight: '600' },
+            'Parcial':       { background: '#E3F2FD', color: '#1565C0', fontWeight: '600' },
+            'No se compra':  { background: '#FDECEA', color: '#C0392B', fontWeight: '600' }
+        };
+        return colores[params.value] || {};
+    }
     """)
 
-    # Obtener configuración de columnas editables
-    config_columnas = utils.obtener_config_columnas_editables()
+    # ── Colores de estado_envio via JS ──────────────────────────────────────
+    cell_style_envio = JsCode("""
+    function(params) {
+        if (params.value === 'Enviado') {
+            return { background: '#E8F5E9', color: '#2E7D32', fontWeight: '600' };
+        }
+        return { background: '#FFF3E0', color: '#E65100', fontWeight: '600' };
+    }
+    """)
 
-    # TABLA EDITABLE usando st.data_editor
-    df_editado = st.data_editor(
-        df_preparado,
-        column_config=config_columnas,
-        num_rows="fixed",  # No permitir agregar/eliminar filas
-        use_container_width=True,
-        key="editor_requisiciones",
-        hide_index=True,
+    # ── Configurar AG Grid ──────────────────────────────────────────────────
+    gb = GridOptionsBuilder.from_dataframe(df_grid)
+
+    gb.configure_default_column(
+        resizable=True,
+        sortable=True,
+        filter=True,
+        editable=False,
+        autoHeight=False,
+        wrapText=False,
+        suppressMenu=False,
+    )
+
+    # Ocultar id
+    gb.configure_column("id", hide=True)
+
+    # ── Columnas de solo lectura ───────────────────────────────────────────
+    gb.configure_column(
+        "numreq", header_name="REQ", width=110, editable=False, pinned="left"
+    )
+    gb.configure_column(
+        "fecha_requisicion",
+        header_name="Fecha REQ",
+        width=115,
+        editable=False,
+        type=["dateColumnFilter", "customDateTimeFormat"],
+        custom_format_string="dd/MM/yyyy",
+    )
+    gb.configure_column(
+        "desprod", header_name="Producto", width=270, editable=False, pinned="left"
+    )
+    gb.configure_column(
+        "cantidad",
+        header_name="Cantidad",
+        width=95,
+        editable=False,
+        type=["numericColumn"],
+    )
+
+    # ── Columnas editables ────────────────────────────────────────────────
+    gb.configure_column("oc", header_name="OC", width=130, editable=True)
+    gb.configure_column(
+        "fecha_oc",
+        header_name="Fecha OC",
+        width=115,
+        editable=True,
+        type=["dateColumnFilter", "customDateTimeFormat"],
+        custom_format_string="dd/MM/yyyy",
+    )
+    gb.configure_column("proveedor", header_name="Proveedor", width=200, editable=True)
+    gb.configure_column(
+        "estado_envio",
+        header_name="Estado Envío",
+        width=140,
+        editable=True,
+        cellEditor="agSelectCellEditor",
+        cellEditorParams={"values": config.ESTADOS_ENVIO},
+        cellStyle=cell_style_envio,
+    )
+    gb.configure_column("n_guia", header_name="Guía", width=120, editable=True)
+
+    # ── Columna Estado editable (dropdown) con colores ─────────────────────
+    gb.configure_column(
+        "estado_req",
+        header_name="Estado REQ",
+        width=145,
+        editable=True,
+        cellEditor="agSelectCellEditor",
+        cellEditorParams={"values": config.ESTADOS_REQ},
+        cellStyle=cell_style_estado,
+    )
+
+    gb.configure_column(
+        "observacion", header_name="Observación", width=260, editable=True
+    )
+
+    gb.configure_selection(selection_mode="single", use_checkbox=False)
+    gb.configure_grid_options(
+        rowHeight=38,
+        headerHeight=42,
+        suppressMovableColumns=False,
+        enableRangeSelection=True,
+        stopEditingWhenCellsLoseFocus=True,
+        undoRedoCellEditing=True,
+        undoRedoCellEditingLimit=20,
+    )
+
+    grid_options = gb.build()
+
+    # ── Botones marcar/desmarcar todos ─────────────────────────────────────
+    _col_mark, _col_unmark, _col_spacer = st.columns([2, 2, 6])
+    with _col_mark:
+        if st.button("✅ Marcar todos como enviados", use_container_width=True):
+            st.session_state.estado_envio_override = "Enviado"
+            st.rerun()
+    with _col_unmark:
+        if st.button("↩ Marcar todos como no enviados", use_container_width=True):
+            st.session_state.estado_envio_override = "No Enviado"
+            st.rerun()
+
+    st.info(
+        "💡 **Tabla Editable** — Haz doble clic en una celda para editarla. "
+        "Columnas editables: **OC · Fecha OC · Proveedor · Estado Envío · Guía · Estado REQ · Observación**. "
+        "Guarda los cambios con el botón **💾 Guardar Cambios**."
+    )
+
+    # Forzar estilos del tema oscuro de AG Grid dentro del iframe de Streamlit
+    st.markdown(
+        """
+        <style>
+        .ag-theme-alpine-dark {
+            --ag-background-color: #1e1e2e !important;
+            --ag-header-background-color: #2a2a3e !important;
+            --ag-odd-row-background-color: #252535 !important;
+            --ag-row-hover-color: #3a3a5c !important;
+            --ag-selected-row-background-color: #3a3a5c !important;
+            --ag-font-size: 13px !important;
+            --ag-foreground-color: #e0e0e0 !important;
+            --ag-header-foreground-color: #ffffff !important;
+            --ag-border-color: #3a3a5c !important;
+            --ag-row-border-color: #2a2a3e !important;
+            --ag-cell-horizontal-border: solid #2a2a3e !important;
+        }
+        .ag-theme-alpine-dark .ag-root-wrapper {
+            background-color: #1e1e2e !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Renderizar AG Grid con tema Alpine Dark
+    grid_response = AgGrid(
+        df_grid,
+        gridOptions=grid_options,
+        update_on=["cellValueChanged"],
+        data_return_mode=DataReturnMode.AS_INPUT,
+        fit_columns_on_grid_load=True,
+        enable_enterprise_modules=False,
+        theme="alpine-dark",
         height=500,
+        use_container_width=True,
+        key="aggrid_requisiciones",
+        allow_unsafe_jscode=True,
+    )
+
+    # Limpiar override tras renderizar el grid
+    st.session_state.estado_envio_override = None
+
+    # ── Leyenda de colores ──────────────────────────────────────────────────
+    st.markdown(
+        """
+        <div style="display:flex; gap:18px; flex-wrap:wrap; margin-top:8px; font-size:13px;">
+            <span style="background:#FFF8E1; color:#E65100; padding:3px 10px;
+                border-radius:4px; font-weight:600;">
+                Pendiente — Requisición sin cerrar
+            </span>
+            <span style="background:#E8F5E9; color:#2E7D32; padding:3px 10px;
+                border-radius:4px; font-weight:600;">
+                Recepcionada — Recibida completa
+            </span>
+            <span style="background:#E3F2FD; color:#1565C0; padding:3px 10px;
+                border-radius:4px; font-weight:600;">
+                Parcial — Recepción incompleta
+            </span>
+            <span style="background:#FDECEA; color:#C0392B; padding:3px 10px;
+                border-radius:4px; font-weight:600;">
+                No se compra — Cancelada / descartada
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # DataFrame con las ediciones del usuario
+    df_editado_raw = grid_response["data"]
+
+    # Normalizar estado_envio: AG Grid devuelve siempre strings con agSelectCellEditor.
+    # Asegurar que el valor sea uno de los permitidos; si no, usar el valor por defecto.
+    df_editado_grid = pd.DataFrame(df_editado_raw)
+    if "estado_envio" in df_editado_grid.columns:
+        df_editado_grid["estado_envio"] = (
+            df_editado_grid["estado_envio"]
+            .fillna("No Enviado")
+            .astype(str)
+            .apply(lambda v: v if v in config.ESTADOS_ENVIO else "No Enviado")
+        )
+
+    # Combinar ediciones de la grid con columnas no visibles de df_preparado
+    cols_solo_grid = [c for c in df_editado_grid.columns if c in df_preparado.columns]
+    df_editado = df_preparado.copy()
+    df_editado.update(
+        df_editado_grid[cols_solo_grid].set_index("id")
+        if "id" in cols_solo_grid
+        else df_editado_grid[cols_solo_grid]
     )
 
     st.markdown("---")
@@ -885,7 +1323,6 @@ def tabla_listado_requisiciones():
     with col1:
         if st.button("💾 Guardar Cambios", type="primary", use_container_width=True):
             try:
-                # Validar ediciones antes de guardar
                 es_valido, errores = utils.validar_ediciones_antes_de_guardar(
                     df_editado
                 )
@@ -896,45 +1333,32 @@ def tabla_listado_requisiciones():
                         st.warning(error)
                     st.stop()
 
-                # Procesar ediciones en batch
                 with st.spinner("Guardando cambios en la base de datos..."):
                     resultado = db.procesar_ediciones_batch_ui(
                         st.session_state.df_req_original, df_editado
                     )
 
-                # Mostrar resultados
                 if resultado["success"]:
                     st.success(
                         f"✅ {resultado['exitosas']} requisiciones actualizadas correctamente"
                     )
-
                     if resultado["fallidas"] > 0:
                         st.warning(
                             f"⚠️ {resultado['fallidas']} actualizaciones fallaron"
                         )
-
                     if resultado["sin_cambios"] > 0:
                         st.info(
                             f"ℹ️ {resultado['sin_cambios']} requisiciones sin cambios"
                         )
-
-                    # Actualizar estado original con los cambios guardados
                     st.session_state.df_req_original = df_editado.copy()
-
-                    # Mostrar detalles
                     if resultado["mensajes"]:
                         with st.expander("📋 Ver detalles de las operaciones"):
                             for mensaje in resultado["mensajes"]:
                                 st.text(mensaje)
-
-                    # Recargar página
                     st.balloons()
                     st.rerun()
-
                 else:
                     st.error("❌ No se pudo guardar ningún cambio")
-
-                    # Mostrar mensajes de error
                     if resultado["mensajes"]:
                         with st.expander("⚠️ Ver errores"):
                             for mensaje in resultado["mensajes"]:
@@ -942,7 +1366,7 @@ def tabla_listado_requisiciones():
 
             except Exception as e:
                 st.error(f"❌ Error inesperado al guardar cambios: {str(e)}")
-                st.exception(e)  # Mostrar traceback completo para debugging
+                st.exception(e)
 
     with col2:
         if st.button("🔄 Recargar Datos", use_container_width=True):
@@ -962,15 +1386,11 @@ def tabla_listado_requisiciones():
                     "requisiciones", "xlsx"
                 )
                 ruta_completa = os.path.join(config.EXPORT_PATH, nombre_archivo)
-
                 df_export = utils.preparar_dataframe_para_exportar(df_editado)
-
                 with pd.ExcelWriter(ruta_completa, engine="openpyxl") as writer:
                     df_export.to_excel(writer, sheet_name="Requisiciones", index=False)
                     utils.aplicar_formato_excel(writer, df_export, "Requisiciones")
-
                 st.success(f"✅ Exportado: {nombre_archivo}")
-
             except Exception as e:
                 st.error(f"❌ Error al exportar: {str(e)}")
 
@@ -993,6 +1413,10 @@ def pagina_seguimiento_oc():
         st.session_state.filtro_buscar_producto = ""
     if "filtro_observacion" not in st.session_state:
         st.session_state.filtro_observacion = ""
+    if "filtro_oc_desprod" not in st.session_state:
+        st.session_state.filtro_oc_desprod = ""
+    if "filtro_oc_proveedor" not in st.session_state:
+        st.session_state.filtro_oc_proveedor = []
 
     # Verificar si existe la tabla de compras
     try:
@@ -1015,27 +1439,53 @@ def pagina_seguimiento_oc():
             # Obtener estadísticas
             stats = compras_service.obtener_estadisticas_compras(conn)
 
-            # Mostrar estadísticas generales
-            st.subheader("📊 Resumen General")
-            col1, col2, col3, col4 = st.columns(4)
-
-            with col1:
-                st.metric("📦 Total Líneas", stats["total_registros"])
-            with col2:
-                st.metric("🛒 OCs Únicas", stats["total_ocs"])
-            with col3:
-                st.metric("🏷️ Productos", stats["total_productos"])
-            with col4:
-                st.metric("💰 Valor Total", f"${stats['valor_total']:,.0f}")
-
-            # Mostrar distribución por estado si hay datos
-            if stats["por_estado"]:
-                st.markdown("---")
-                st.subheader("📈 Distribución por Estado")
-                cols_estado = st.columns(len(stats["por_estado"]))
-                for idx, (estado, cantidad) in enumerate(stats["por_estado"].items()):
-                    with cols_estado[idx]:
-                        st.metric(estado, cantidad)
+            # Gráfico de barras: estados operativos de requisiciones
+            kpis_req = db.obtener_kpis_dashboard()
+            df_req_all = db.obtener_requisiciones({})
+            req_cerradas = (
+                int((df_req_all["estado_oc"] == "Recepción Completa").sum())
+                if not df_req_all.empty
+                else 0
+            )
+            df_barras = pd.DataFrame(
+                {
+                    "Estado": [
+                        "REQ pendiente",
+                        "OC emitida",
+                        "OC enviada (estado 'Enviado')",
+                        "REQ cerrada",
+                    ],
+                    "Cantidad": [
+                        kpis_req["req_pendientes"],
+                        kpis_req["oc_emitidas"],
+                        kpis_req["oc_enviadas"],
+                        req_cerradas,
+                    ],
+                    "Color": ["#FFA500", "#4169E1", "#32CD32", "#808080"],
+                }
+            )
+            fig_barras = px.bar(
+                df_barras,
+                x="Estado",
+                y="Cantidad",
+                title="Estado de Requisiciones",
+                color="Estado",
+                color_discrete_map={
+                    "REQ pendiente": "#FFA500",
+                    "OC emitida": "#4169E1",
+                    "OC enviada": "#32CD32",
+                    "REQ cerrada": "#808080",
+                },
+                text="Cantidad",
+            )
+            fig_barras.update_traces(textposition="outside")
+            fig_barras.update_layout(
+                showlegend=False,
+                margin=dict(t=50, b=10),
+                yaxis_title="N° Requisiciones",
+                xaxis_title="",
+            )
+            st.plotly_chart(fig_barras, use_container_width=True)
 
             st.markdown("---")
 
@@ -1117,12 +1567,45 @@ def pagina_seguimiento_oc():
                 )
                 st.session_state.filtro_observacion = buscar_observacion
 
+            col_txt3, col_txt4 = st.columns(2)
+
+            with col_txt3:
+                buscar_desprod = st.text_input(
+                    "🔎 Buscar descripción producto:",
+                    value=st.session_state.filtro_oc_desprod,
+                    help="Filtra por nombre/descripción del producto (búsqueda parcial)",
+                    key="txt_desprod_oc",
+                )
+                st.session_state.filtro_oc_desprod = buscar_desprod
+
+            with col_txt4:
+                # Lista de proveedores del SQL completo (sin filtros activos)
+                cursor.execute(
+                    "SELECT DISTINCT proveedor FROM compras WHERE proveedor IS NOT NULL AND proveedor != '' ORDER BY proveedor"
+                )
+                proveedores_oc = [row[0] for row in cursor.fetchall()]
+
+                filtro_oc_proveedor = st.multiselect(
+                    "🏢 Proveedor",
+                    options=proveedores_oc,
+                    default=[
+                        p
+                        for p in st.session_state.filtro_oc_proveedor
+                        if p in proveedores_oc
+                    ],
+                    help="Filtra por uno o más proveedores",
+                    key="multi_proveedor_oc",
+                )
+                st.session_state.filtro_oc_proveedor = filtro_oc_proveedor
+
             # Botón para limpiar filtros
             if st.button("🔄 Limpiar Filtros", type="secondary"):
                 st.session_state.filtro_oc_seleccionada = "Todas"
                 st.session_state.filtro_estado_seleccionado = "Todos"
                 st.session_state.filtro_buscar_producto = ""
                 st.session_state.filtro_observacion = ""
+                st.session_state.filtro_oc_desprod = ""
+                st.session_state.filtro_oc_proveedor = []
                 st.rerun()
 
             st.markdown("---")
@@ -1178,6 +1661,20 @@ def pagina_seguimiento_oc():
                     df_compras["Observación"]
                     .str.lower()
                     .str.startswith(buscar_observacion.lower(), na=False)
+                ]
+
+            # Filtro por descripción de producto (búsqueda parcial, case-insensitive)
+            if buscar_desprod:
+                df_compras = df_compras[
+                    df_compras["Nombre Producto"].str.contains(
+                        buscar_desprod, case=False, na=False
+                    )
+                ]
+
+            # Filtro por proveedor (multiselect)
+            if filtro_oc_proveedor:
+                df_compras = df_compras[
+                    df_compras["Proveedor"].isin(filtro_oc_proveedor)
                 ]
 
             # Mostrar título de resultados
@@ -1324,7 +1821,11 @@ def pagina_configuracion():
                 # Copiar archivo
                 shutil.copy2(ruta_origen, ruta_destino)
 
-                st.success(f"{config.MSG_EXITO_BACKUP}: {nombre_backup}")
+                # Registrar en backups_log
+                tamanio_mb = os.path.getsize(ruta_destino) / (1024 * 1024)
+                db.registrar_backup(nombre_backup, tamanio_mb)
+
+                st.success(f"{config.MSG_EXITO_BACKUP}: {ruta_destino}")
 
             except Exception as e:
                 st.error(f"{config.MSG_ERROR_BACKUP}: {str(e)}")

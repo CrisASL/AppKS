@@ -556,13 +556,67 @@ Eliminar round-trips Python por fila y pre-SELECTs de tabla completa en los fluj
 
 ---
 
+## 🔹 v1.8.0 – Reemplazo de Columna Booleana por Estado de Envío Textual
+
+### 🎯 Objetivo
+Eliminar la columna `oc_enviada` (INTEGER/bool) de la UI y reemplazarla por `estado_envio` (TEXT), eliminando conflictos de tipo entre AG Grid, pandas y SQLite, y ganando un control de estado más expresivo con dropdown.
+
+### 🐛 Problema Raíz
+La columna `oc_enviada INTEGER DEFAULT 0` generaba errores de dtype persistentes:
+- AG Grid devolvía strings `"true"/"false"` al usuario editar celdas
+- Pandas coercionaba a `bool`, pero SQLite esperaba `int`
+- El `st.data_editor` con `CheckboxColumn` no era compatible con `agGrid` en paralelo
+- Imposible distinguir "nunca marcado" de "marcado y desmarcado" en el historial
+
+### ✅ Solución Técnica
+
+#### 1. Nuevo campo `estado_envio` en `database.py`
+- Schema: `estado_envio TEXT DEFAULT 'No Enviado'`
+- Migración idempotente: `ALTER TABLE ADD COLUMN` con guard `if "estado_envio" not in columnas_existentes`
+- `oc_enviada` mantenido en migración y save-validator para compatibilidad con DBs antiguas (no visible en UI)
+
+#### 2. Constante y configuración en `config.py`
+- `ESTADOS_ENVIO = ["No Enviado", "Enviado"]` siguiendo el patrón de `ESTADOS_REQ`
+- `"estado_envio"` agregado a `CAMPOS_EDITABLES_UI`; `"oc_enviada"` marcado como legado
+
+#### 3. Normalización en `utils.py`
+- `obtener_config_columnas_editables()`: `CheckboxColumn("oc_enviada")` → `SelectboxColumn("estado_envio", options=ESTADOS_ENVIO)`
+- `preparar_df_para_edicion_segura()`: `.fillna("No Enviado").astype(str)` reemplaza la coerción bool anterior
+
+#### 4. Grid y UI en `main.py`
+- `agSelectCellEditor` con `cellEditorParams={"values": config.ESTADOS_ENVIO}`
+- `cell_style_envio` JsCode: verde para `"Enviado"`, naranja para `"No Enviado"`
+- Dos botones de acción masiva: **"✅ Marcar todos como enviados"** y **"↩ Marcar todos como no enviados"** via `estado_envio_override` en session state
+- Override se resetea automáticamente después de renderizar el grid
+
+#### 5. KPIs actualizados
+- `obtener_kpis_dashboard()`: `df["oc_enviada"].fillna(False).astype(bool).sum()` → `(df["estado_envio"].fillna("No Enviado") == "Enviado").sum()`
+- Resumen operativo en `main.py` usa la misma comparación de string
+
+### 🔐 Garantía de preservación de datos
+- `cargar_requisiciones_desde_cubo()` usa `INSERT OR IGNORE`: el campo `estado_envio` **no está en el INSERT**, por lo que al recargar el cubo:
+  - Filas existentes: `estado_envio` conserva el valor asignado por el usuario
+  - Filas nuevas: reciben `DEFAULT 'No Enviado'` de SQLite automáticamente
+
+### 📈 Resultado
+✅ Sin conflictos de tipo entre AG Grid, pandas y SQLite  
+✅ Dropdown expresivo con validación por whitelist  
+✅ Celda con color contextual (JS)  
+✅ Acciones masivas funcionales  
+✅ Estado de envío preservado al recargar cubos  
+✅ Migración backward-compatible con DBs anteriores  
+
+---
+
 # 📍 Estado Actual del Proyecto
 
 El proyecto se encuentra actualmente en la versión:
 
-## 🔹 **v1.7.0**
+## 🔹 **v1.8.0**
 
 Sistema completo de gestión de requisiciones, compras y análisis de stock con:
+- **Estado de envío textual** (`estado_envio TEXT`) con dropdown, validación por whitelist y cell styles JS
+- Acciones masivas de marcado de envío preservadas en session state
 - Seguimiento avanzado de órdenes de compra con filtros de texto
 - Sincronización automática REQ→OC: pure SQL (`UPDATE...WHERE EXISTS`, `julianday()`), ventana 0–90 días, sin loops Python
 - Sincronización gestion→compras: `UPDATE...FROM` en un único JOIN pass

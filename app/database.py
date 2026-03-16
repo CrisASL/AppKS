@@ -8,6 +8,7 @@ import hashlib
 import sqlite3
 import json
 from datetime import datetime
+from io import StringIO
 from typing import Dict, List, Optional, Tuple
 import pandas as pd
 from contextlib import contextmanager
@@ -71,6 +72,8 @@ def inicializar_base_datos():
                 detalle TEXT,
                 cant_recibida INTEGER DEFAULT 0,
                 estado_oc TEXT DEFAULT 'Pendiente',
+                estado_envio TEXT DEFAULT 'No Enviado',
+                estado_req TEXT DEFAULT 'Pendiente',
                 saldo_pendiente INTEGER,
                 fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 fecha_modificacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -182,6 +185,19 @@ def inicializar_base_datos():
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_cargas_fecha
             ON cargas_diarias(fecha_carga)
+        """)
+
+        # ========================================================================
+        # TABLA: backups_log
+        # ========================================================================
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS backups_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha TEXT NOT NULL,
+                nombre_archivo TEXT NOT NULL,
+                tamanio_mb REAL,
+                tipo TEXT DEFAULT 'manual'
+            )
         """)
 
         # ========================================================================
@@ -365,7 +381,7 @@ def cargar_cubo_raw(nombre_cubo: str) -> Optional[pd.DataFrame]:
         row = cursor.fetchone()
         if not row:
             return None
-        df = pd.read_json(row[0], orient="records")
+        df = pd.read_json(StringIO(row[0]), orient="records")
         return df if not df.empty else None
     except Exception:
         return None
@@ -393,6 +409,33 @@ def migrar_base_datos_existente():
                 """)
                 conn.commit()
                 print("✅ Campo fecha_requisicion agregado exitosamente")
+
+            if "oc_enviada" not in columnas_existentes:
+                print("⚙️ Migrando: Agregando campo oc_enviada...")
+                cursor.execute("""
+                    ALTER TABLE requisiciones
+                    ADD COLUMN oc_enviada INTEGER DEFAULT 0
+                """)
+                conn.commit()
+                print("✅ Campo oc_enviada agregado exitosamente")
+
+            if "estado_envio" not in columnas_existentes:
+                print("⚙️ Migrando: Agregando campo estado_envio...")
+                cursor.execute("""
+                    ALTER TABLE requisiciones
+                    ADD COLUMN estado_envio TEXT DEFAULT 'No Enviado'
+                """)
+                conn.commit()
+                print("✅ Campo estado_envio agregado exitosamente")
+
+            if "estado_req" not in columnas_existentes:
+                print("⚙️ Migrando: Agregando campo estado_req...")
+                cursor.execute("""
+                    ALTER TABLE requisiciones
+                    ADD COLUMN estado_req TEXT DEFAULT 'Pendiente'
+                """)
+                conn.commit()
+                print("✅ Campo estado_req agregado exitosamente")
 
             # Verificar si existe constraint UNIQUE(numreq, codprod)
             cursor.execute("""
@@ -837,6 +880,197 @@ def obtener_req_pendientes() -> pd.DataFrame:
     return obtener_requisiciones({"solo_pendientes": True})
 
 
+def obtener_kpis_dashboard(
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None,
+    numreq: Optional[str] = None,
+) -> Dict:
+    """
+    Calcula los KPIs operativos del Dashboard con filtros opcionales.
+
+    KPIs:
+      - req_pendientes : oc IS NULL AND n_guia IS NULL AND (observacion IS NULL OR observacion='')
+      - oc_emitidas    : oc IS NOT NULL AND oc != ''
+      - oc_enviadas    : estado_envio = 'Enviado'
+      - oc_no_enviadas : oc IS NOT NULL AND oc != '' AND estado_envio != 'Enviado'
+
+    Args:
+        fecha_desde (str): Filtro de fecha inicio (YYYY-MM-DD), opcional
+        fecha_hasta (str): Filtro de fecha fin  (YYYY-MM-DD), opcional
+        numreq      (str): Filtro por número de requisición (búsqueda parcial), opcional
+
+    Returns:
+        Dict con claves: req_pendientes, oc_emitidas, oc_enviadas, oc_no_enviadas
+    """
+    _defaults = {
+        "req_pendientes": 0,
+        "oc_emitidas": 0,
+        "oc_enviadas": 0,
+        "oc_no_enviadas": 0,
+    }
+    try:
+        df = get_table("requisiciones").copy()
+        if df.empty:
+            return _defaults
+
+        # Aplicar filtros
+        if fecha_desde:
+            df = df[
+                df["fecha_requisicion"].notna()
+                & (df["fecha_requisicion"] >= str(fecha_desde))
+            ]
+        if fecha_hasta:
+            df = df[
+                df["fecha_requisicion"].notna()
+                & (df["fecha_requisicion"] <= str(fecha_hasta))
+            ]
+        if numreq:
+            df = df[df["numreq"].str.contains(numreq, na=False, case=False)]
+
+        if df.empty:
+            return _defaults
+
+        # Normalizar columnas que pueden estar ausentes en DBs antiguas
+        if "estado_envio" not in df.columns:
+            df["estado_envio"] = "No Enviado"
+
+        # REQ pendientes: sin OC, sin guía, sin observación
+        oc_vacia = df["oc"].isna() | (df["oc"].astype(str).str.strip() == "")
+        guia_vacia = df["n_guia"].isna() | (df["n_guia"].astype(str).str.strip() == "")
+        obs_vacia = df["observacion"].isna() | (
+            df["observacion"].astype(str).str.strip() == ""
+        )
+        req_pendientes = int((oc_vacia & guia_vacia & obs_vacia).sum())
+
+        # OC emitidas: tiene número de OC
+        oc_emitidas_mask = ~oc_vacia
+        oc_emitidas = int(oc_emitidas_mask.sum())
+
+        # OC enviadas: estado_envio = 'Enviado'
+        _enviado_mask = df["estado_envio"].fillna("No Enviado") == "Enviado"
+        oc_enviadas = int(_enviado_mask.sum())
+
+        # OC no enviadas: tiene OC pero no enviada
+        oc_no_enviadas = int((oc_emitidas_mask & ~_enviado_mask).sum())
+
+        return {
+            "req_pendientes": req_pendientes,
+            "oc_emitidas": oc_emitidas,
+            "oc_enviadas": oc_enviadas,
+            "oc_no_enviadas": oc_no_enviadas,
+        }
+    except Exception:
+        return _defaults
+
+
+def obtener_req_pendientes_df(
+    fecha_desde: Optional[str] = None,
+    fecha_hasta: Optional[str] = None,
+    numreq: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Retorna las requisiciones pendientes (sin OC, sin guía, sin observación)
+    con los filtros de fecha y numreq aplicados.
+
+    Args:
+        fecha_desde (str): Filtro de fecha inicio (YYYY-MM-DD), opcional
+        fecha_hasta (str): Filtro de fecha fin  (YYYY-MM-DD), opcional
+        numreq      (str): Filtro por número de requisición, opcional
+
+    Returns:
+        pd.DataFrame con columnas: numreq, codprod, desprod, cantidad,
+                                   fecha_requisicion, proveedor
+    """
+    try:
+        df = get_table("requisiciones").copy()
+        if df.empty:
+            return pd.DataFrame()
+
+        # Filtros de fecha y numreq
+        if fecha_desde:
+            df = df[
+                df["fecha_requisicion"].notna()
+                & (df["fecha_requisicion"] >= str(fecha_desde))
+            ]
+        if fecha_hasta:
+            df = df[
+                df["fecha_requisicion"].notna()
+                & (df["fecha_requisicion"] <= str(fecha_hasta))
+            ]
+        if numreq:
+            df = df[df["numreq"].str.contains(numreq, na=False, case=False)]
+
+        if df.empty:
+            return pd.DataFrame()
+
+        # Condición de pendiente
+        oc_vacia = df["oc"].isna() | (df["oc"].astype(str).str.strip() == "")
+        guia_vacia = df["n_guia"].isna() | (df["n_guia"].astype(str).str.strip() == "")
+        obs_vacia = df["observacion"].isna() | (
+            df["observacion"].astype(str).str.strip() == ""
+        )
+        df_pend = df[oc_vacia & guia_vacia & obs_vacia].copy()
+
+        cols = [
+            c
+            for c in [
+                "numreq",
+                "codprod",
+                "desprod",
+                "cantidad",
+                "fecha_requisicion",
+                "proveedor",
+            ]
+            if c in df_pend.columns
+        ]
+        return df_pend[cols].sort_values("fecha_requisicion", ascending=False)
+
+    except Exception:
+        return pd.DataFrame()
+
+
+def obtener_top_productos_ultimo_mes(limite: int = 10) -> pd.DataFrame:
+    """
+    Retorna los productos más solicitados en los últimos 30 días,
+    calculados desde la tabla de requisiciones.
+
+    Args:
+        limite (int): Número máximo de productos a retornar
+
+    Returns:
+        pd.DataFrame con columnas: codprod, desprod, num_requisiciones, cantidad_total
+    """
+    try:
+        from datetime import datetime, timedelta
+
+        fecha_corte = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+        df = get_table("requisiciones").copy()
+        if df.empty:
+            return pd.DataFrame()
+
+        df = df[
+            df["fecha_requisicion"].notna() & (df["fecha_requisicion"] >= fecha_corte)
+        ]
+        if df.empty:
+            return pd.DataFrame()
+
+        cols_group = ["codprod"] + (["desprod"] if "desprod" in df.columns else [])
+        resultado = (
+            df.groupby(cols_group)
+            .agg(
+                num_requisiciones=("numreq", "nunique"),
+                cantidad_total=("cantidad", "sum"),
+            )
+            .reset_index()
+            .sort_values("cantidad_total", ascending=False)
+            .head(limite)
+        )
+        return resultado
+    except Exception:
+        return pd.DataFrame()
+
+
 def obtener_estadisticas_generales() -> Dict:
     """
     Calcula estadísticas generales para el dashboard usando el DataFrame
@@ -1086,6 +1320,30 @@ def actualizar_requisicion_desde_ui(
             if campo in ["proveedor", "oc", "n_guia", "observacion", "detalle"]:
                 if valor is None or (isinstance(valor, float) and pd.isna(valor)):
                     valor = ""
+
+            # Convertir booleano a entero para campos de control operativo
+            # (oc_enviada ya no se usa — mantenido por compatibilidad con DBs antiguas)
+            if campo == "oc_enviada":
+                if isinstance(valor, bool):
+                    valor = 1 if valor else 0
+                elif valor is None or (isinstance(valor, float) and pd.isna(valor)):
+                    valor = 0
+                else:
+                    valor = int(bool(valor))
+
+            # Validar estado_envio contra valores permitidos
+            if campo == "estado_envio":
+                if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+                    valor = "No Enviado"
+                elif valor not in config.ESTADOS_ENVIO:
+                    valor = "No Enviado"
+
+            # Validar estado_req contra valores permitidos
+            if campo == "estado_req":
+                if valor is None or (isinstance(valor, float) and pd.isna(valor)):
+                    valor = "Pendiente"
+                elif valor not in config.ESTADOS_REQ:
+                    valor = "Pendiente"
 
             # Validar fecha_oc si se proporciona
             if campo == "fecha_oc" and valor:
@@ -1431,6 +1689,36 @@ def obtener_configuracion(clave: str, default: str = None) -> Optional[str]:
 
     except Exception as e:
         return default
+
+
+def registrar_backup(
+    nombre_archivo: str, tamanio_mb: float, tipo: str = "manual"
+) -> bool:
+    """
+    Registra un backup realizado en la tabla backups_log.
+
+    Args:
+        nombre_archivo (str): Nombre del archivo de backup (sin ruta)
+        tamanio_mb (float): Tamaño del archivo en MB
+        tipo (str): Tipo de backup ('manual' por defecto)
+
+    Returns:
+        bool: True si se registró correctamente, False en caso de error
+    """
+    try:
+        from datetime import datetime
+
+        fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO backups_log (fecha, nombre_archivo, tamanio_mb, tipo) VALUES (?, ?, ?, ?)",
+                (fecha, nombre_archivo, round(tamanio_mb, 3), tipo),
+            )
+            conn.commit()
+        return True
+    except Exception as e:
+        return False
 
 
 # ============================================================================
@@ -1802,32 +2090,42 @@ def limpiar_cubo_inventario() -> Tuple[bool, str]:
 
 def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
     """
-    Cruza requisiciones con órdenes de compra en dos pasos:
+    Cruza requisiciones con órdenes de compra en tres pasos:
 
     Paso 1 — Proveedor de respaldo (sin restricciones de OC):
         Para toda REQ cuyo codprod exista en compras, asigna el proveedor
         de la compra más reciente (fecha_oc DESC). Solo toca el campo
         proveedor; no modifica oc, fecha_oc ni estado_oc.
 
-    Paso 2 — Match completo REQ→OC (reglas estrictas):
-        Sobreescribe proveedor + oc + fecha_oc + estado_oc cuando la REQ
-        encuentra una OC que cumple todas las reglas:
+    Paso 2 — Match por referencia explícita en observación (mayor prioridad):
+        Revisa la columna observacion de cada OC en compras buscando un
+        patrón tipo "T 22016" (regex: [A-Z]\\s*(\\d+)). Si el número
+        extraído coincide con un numreq existente en requisiciones, asigna
+        esa OC directamente. Esta asignación tiene prioridad sobre el paso 3.
+
+    Paso 3 — Match automático REQ→OC (reglas ajustadas):
+        Para REQ que no recibieron asignación en el paso 2, selecciona la
+        OC del mismo producto que cumpla:
         1. codprod_req == codprod_oc
-        2. fecha_oc >= fecha_req
-        3. fecha_oc <= fecha_req + 90 días
-        4. cantidad_oc >= cantidad_req * 0.8
+        2. fecha_oc dentro de 0–7 días desde la REQ
+        3. cantidad_oc >= cantidad_req * 0.8  (mínimo 80%)
+        4. cantidad_oc <= cantidad_req * 10   (máximo 10× para excluir importaciones)
         Selección: OC con fecha_oc más cercana posterior a la REQ (ASC).
 
     Resultado final:
-        - REQ con OC válida  → proveedor + oc + fecha_oc + estado_oc completos
-        - REQ sin OC válida  → solo proveedor (el más reciente del producto)
-        - REQ sin codprod en compras → sin cambios
+        - REQ con match por observación → OC asignada por referencia explícita
+        - REQ con match automático      → OC asignada por reglas
+        - REQ sin OC válida             → solo proveedor de respaldo
+        - REQ sin codprod en compras    → sin cambios
 
     Returns:
         Tuple[bool, str, int]: (éxito, mensaje, cantidad_con_oc_asignada)
     """
-    VENTANA_DIAS = 90
-    FACTOR_CANTIDAD = 0.8
+    import re
+
+    VENTANA_DIAS = 7
+    FACTOR_MIN = 0.8
+    FACTOR_MAX = 10.0
 
     try:
         with get_db_connection() as conn:
@@ -1891,10 +2189,75 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
             con_proveedor = cursor.rowcount
 
             # ------------------------------------------------------------------
-            # PASO 2: Match completo REQ→OC (sobreescribe paso 1 si hay match)
-            # Para cada REQ selecciona la OC del mismo producto dentro de la
-            # ventana de 90 días y con cantidad >= 80%, ordenada por fecha_oc
-            # ascendente (la más cercana posterior a la REQ).
+            # PASO 2: Match por referencia explícita en observación
+            # Se ejecuta en Python porque SQLite no soporta regex nativo.
+            # Lee todas las OC con observación no vacía, extrae el número de
+            # requisición con regex ([A-Z])\s*(\d+), y actualiza la REQ
+            # correspondiente si el numreq existe.
+            # ------------------------------------------------------------------
+            cursor.execute("""
+                SELECT c.num_oc, c.codprod, c.proveedor, c.fecha_oc,
+                       c.estado_linea, c.observacion
+                FROM compras c
+                WHERE c.observacion IS NOT NULL
+                  AND c.observacion != ''
+                  AND c.fecha_oc IS NOT NULL
+            """)
+            ocs_con_observacion = cursor.fetchall()
+
+            # Cargar numreqs existentes para validación rápida
+            cursor.execute("SELECT id, numreq FROM requisiciones")
+            req_por_numreq: dict = {}
+            for row in cursor.fetchall():
+                req_id, numreq = row[0], row[1]
+                if numreq:
+                    # normalizar: sin espacios internos, mayúsculas
+                    clave = re.sub(r"\s+", "", numreq.strip().upper())
+                    req_por_numreq[clave] = req_id
+
+            _PATRON_REF = re.compile(r"([A-Z])\s*(\d+)", re.IGNORECASE)
+            con_obs = 0
+
+            for oc_row in ocs_con_observacion:
+                num_oc, codprod, proveedor, fecha_oc, estado_linea, observacion = oc_row
+                if not observacion:
+                    continue
+
+                match = _PATRON_REF.search(observacion)
+                if not match:
+                    continue
+
+                # Reconstruir la clave normalizada igual que la de requisiciones
+                letra = match.group(1).upper()
+                numero = match.group(2)
+                clave_ref = f"{letra}{numero}"  # ej: "T22016"
+
+                req_id = req_por_numreq.get(clave_ref)
+                if req_id is None:
+                    continue
+
+                # Asignar la OC directamente a esa requisición
+                cursor.execute(
+                    """
+                    UPDATE requisiciones
+                    SET proveedor  = ?,
+                        oc         = ?,
+                        fecha_oc   = ?,
+                        estado_oc  = ?
+                    WHERE id = ?
+                      AND codprod  = ?
+                """,
+                    (proveedor, num_oc, fecha_oc, estado_linea, req_id, codprod),
+                )
+
+                if cursor.rowcount > 0:
+                    con_obs += 1
+
+            # ------------------------------------------------------------------
+            # PASO 3: Match automático REQ→OC (para REQ sin asignación explícita)
+            # Ventana reducida a 7 días, con límite superior de 10× la cantidad
+            # para evitar importaciones con volúmenes desproporcionados.
+            # Solo aplica a REQ que aún no tienen OC asignada (oc IS NULL).
             # ------------------------------------------------------------------
             cursor.execute(
                 """
@@ -1906,7 +2269,8 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
                           AND c.fecha_oc IS NOT NULL
                           AND julianday(c.fecha_oc) >= julianday(requisiciones.fecha_requisicion)
                           AND julianday(c.fecha_oc) <= julianday(requisiciones.fecha_requisicion) + :ventana
-                          AND c.cantidad_solicitada >= requisiciones.cantidad * :factor
+                          AND c.cantidad_solicitada >= requisiciones.cantidad * :factor_min
+                          AND c.cantidad_solicitada <= requisiciones.cantidad * :factor_max
                         ORDER BY julianday(c.fecha_oc) ASC
                         LIMIT 1
                     ),
@@ -1917,7 +2281,8 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
                           AND c.fecha_oc IS NOT NULL
                           AND julianday(c.fecha_oc) >= julianday(requisiciones.fecha_requisicion)
                           AND julianday(c.fecha_oc) <= julianday(requisiciones.fecha_requisicion) + :ventana
-                          AND c.cantidad_solicitada >= requisiciones.cantidad * :factor
+                          AND c.cantidad_solicitada >= requisiciones.cantidad * :factor_min
+                          AND c.cantidad_solicitada <= requisiciones.cantidad * :factor_max
                         ORDER BY julianday(c.fecha_oc) ASC
                         LIMIT 1
                     ),
@@ -1928,7 +2293,8 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
                           AND c.fecha_oc IS NOT NULL
                           AND julianday(c.fecha_oc) >= julianday(requisiciones.fecha_requisicion)
                           AND julianday(c.fecha_oc) <= julianday(requisiciones.fecha_requisicion) + :ventana
-                          AND c.cantidad_solicitada >= requisiciones.cantidad * :factor
+                          AND c.cantidad_solicitada >= requisiciones.cantidad * :factor_min
+                          AND c.cantidad_solicitada <= requisiciones.cantidad * :factor_max
                         ORDER BY julianday(c.fecha_oc) ASC
                         LIMIT 1
                     ),
@@ -1939,37 +2305,50 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
                           AND c.fecha_oc IS NOT NULL
                           AND julianday(c.fecha_oc) >= julianday(requisiciones.fecha_requisicion)
                           AND julianday(c.fecha_oc) <= julianday(requisiciones.fecha_requisicion) + :ventana
-                          AND c.cantidad_solicitada >= requisiciones.cantidad * :factor
+                          AND c.cantidad_solicitada >= requisiciones.cantidad * :factor_min
+                          AND c.cantidad_solicitada <= requisiciones.cantidad * :factor_max
                         ORDER BY julianday(c.fecha_oc) ASC
                         LIMIT 1
                     )
                 WHERE requisiciones.fecha_requisicion IS NOT NULL
                   AND requisiciones.fecha_requisicion != ''
+                  AND (requisiciones.oc IS NULL OR requisiciones.oc = '')
                   AND EXISTS (
                       SELECT 1 FROM compras c
                       WHERE c.codprod = requisiciones.codprod
                         AND c.fecha_oc IS NOT NULL
                         AND julianday(c.fecha_oc) >= julianday(requisiciones.fecha_requisicion)
                         AND julianday(c.fecha_oc) <= julianday(requisiciones.fecha_requisicion) + :ventana
-                        AND c.cantidad_solicitada >= requisiciones.cantidad * :factor
+                        AND c.cantidad_solicitada >= requisiciones.cantidad * :factor_min
+                        AND c.cantidad_solicitada <= requisiciones.cantidad * :factor_max
                   )
             """,
-                {"ventana": VENTANA_DIAS, "factor": FACTOR_CANTIDAD},
+                {
+                    "ventana": VENTANA_DIAS,
+                    "factor_min": FACTOR_MIN,
+                    "factor_max": FACTOR_MAX,
+                },
             )
-            con_oc = cursor.rowcount
-            solo_proveedor = con_proveedor - con_oc
+            con_auto = cursor.rowcount
+            con_oc = con_obs + con_auto
+            solo_proveedor = max(0, con_proveedor - con_oc)
 
         invalidar_cache()
 
         mensaje = (
             f"✅ Cruce REQ→OC completado\n\n"
             f"📊 **Resultados:**\n"
-            f"- {con_oc} requisiciones con OC asignada (proveedor + N°OC + fecha + estado)\n"
+            f"- {con_obs} requisiciones asignadas por referencia en observación\n"
+            f"- {con_auto} requisiciones asignadas por algoritmo automático\n"
             f"- {solo_proveedor} requisiciones sin OC válida (solo proveedor de respaldo)\n\n"
-            f"**Criterios de match OC:**\n"
+            f"**Criterios match por observación:**\n"
+            f"- ✓ Patrón en observación OC: [LETRA] [NÚMERO] (ej: T 22016)\n"
+            f"- ✓ Número coincide con numreq existente\n"
+            f"- ✓ Prioridad sobre algoritmo automático\n\n"
+            f"**Criterios match automático:**\n"
             f"- ✓ Mismo producto (codprod)\n"
             f"- ✓ Ventana temporal: 0–{VENTANA_DIAS} días desde la REQ\n"
-            f"- ✓ Cantidad OC ≥ {int(FACTOR_CANTIDAD * 100)}% de cantidad REQ\n"
+            f"- ✓ Cantidad OC ≥ {int(FACTOR_MIN * 100)}% y ≤ {int(FACTOR_MAX * 100)}% de cantidad REQ\n"
             f"- ✓ Selección: OC más cercana posterior a la REQ"
         )
         return True, mensaje, con_oc

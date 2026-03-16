@@ -92,6 +92,9 @@ Al cargar el cubo de compras, el sistema actualiza automáticamente las requisic
 **Launcher minimalista**
 En lugar de empaquetar Streamlit completo (~99 MB), el `.exe` es un launcher de ~8 MB que invoca `streamlit run` en el entorno virtual del proyecto vía `subprocess`. Más simple, más mantenible.
 
+**Edición segura inline**
+La edición de requisiciones usa AG Grid con columnas estrictamente tipadas. Las columnas de estado (`estado_req`, `estado_envio`) son TEXT con validación por whitelist en backend, eliminando conflictos de dtype entre AG Grid (strings), pandas y SQLite. El patrón de override via `session_state` permite acciones masivas (bulk-set) sin recargar datos desde BD.
+
 **Migraciones idempotentes**
 El esquema se actualiza automáticamente al arrancar la app. Las migraciones verifican existencia antes de modificar, ejecutables múltiples veces sin errores.
 
@@ -139,7 +142,7 @@ build.bat
 
 ## Estado actual
 
-**v1.7.0** – En fase de validación
+**v1.8.0** – En fase de validación
 
 - Arquitectura modular por servicios (UI / Services / DAL)
 - Carga idempotente con clave compuesta para requisiciones y compras
@@ -147,9 +150,10 @@ build.bat
 - Control de versión por hash MD5 en cubos de ventas e inventario
 - Sincronización automática REQ → OC: pure SQL con `UPDATE ... WHERE EXISTS`, `julianday()` para aritmética de fechas, ventana 0–90 días
 - Sincronización gestion → compras: `UPDATE gestion SET ... FROM compras` en un único JOIN pass
-- Nuevo índice compuesto `idx_historial_req_fecha` en `historial_cambios(requisicion_id, fecha_cambio DESC)`
+- Índice compuesto `idx_historial_req_fecha` en `historial_cambios(requisicion_id, fecha_cambio DESC)`
 - Módulo Análisis Stock: estado de stock y rotación de productos
 - Edición segura inline en 4 capas (UI → validación → backend → triggers SQL)
+- Estados de columna como TEXT con whitelist (`estado_req`, `estado_envio`) — elimina conflictos de tipo entre AG Grid, pandas y SQLite
 - Migraciones de esquema automáticas e idempotentes
 - Invalidación completa de caché al eliminar cubos (tablas raw + hashes + session state)
 - Launcher `.exe` minimalista (~8 MB)

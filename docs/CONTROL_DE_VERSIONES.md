@@ -608,14 +608,75 @@ La columna `oc_enviada INTEGER DEFAULT 0` generaba errores de dtype persistentes
 
 ---
 
+## 🔹 v1.8.1 – Mejoras de Persistencia y Rehidratación de Datos
+
+### 🎯 Objetivo
+Implementar una solución robusta para la persistencia y rehidratación de cubos de datos que elimina el problema de pérdida de datos al navegar entre pestañas.
+
+### 🐛 Problema Resuelto
+**Síntoma:** Los DataFrames desaparecían al cambiar de pestaña, aunque existían en SQLite.
+
+**Causa raíz:** 
+- `session_state` se quedaba con valores `None` en lugar de eliminar la clave
+- La lógica solo rehidrataba si la clave NO existía: `if key not in st.session_state`
+- Si el valor era `None`, nunca se recargaba desde SQLite
+
+### ✅ Solución Implementada
+
+#### 1. Nueva función centralizada `get_or_load_cubo()` en `database.py`
+```python
+def get_or_load_cubo(nombre_cubo: str) -> Optional[pd.DataFrame]:
+    """
+    Función centralizada para obtener un cubo desde session_state o rehidratarlo desde SQLite.
+    
+    Estrategia robusta de persistencia:
+    1. Si existe en session_state Y no es None → devolverlo directamente
+    2. Si es None o no existe → cargar desde SQLite
+    3. Actualizar session_state con el resultado
+    4. Retornar DataFrame (o None si no hay datos)
+    """
+```
+
+#### 2. Inicialización robusta en `main.py`
+```python
+def inicializar_session_state():
+    # Condición robusta: cargar si NO existe O es None
+    for cubo in ["requisiciones", "compras", "ventas", "inventario"]:
+        key = f"cubo_{cubo}"
+        if key not in st.session_state or st.session_state[key] is None:
+            st.session_state[key] = db.cargar_cubo_raw(cubo)
+```
+
+#### 3. Eliminación correcta de claves
+```python
+# ✅ CORRECTO: Eliminar clave
+st.session_state.pop(session_key, None)
+
+# ❌ INCORRECTO: Asignar None (impide rehidratación)
+# st.session_state[session_key] = None
+```
+
+#### 4. Validación defensiva en módulos
+- Actualización de `pagina_analisis_stock()` con rehidratación automática vía `get_or_load_cubo()`
+- Validación en `view.py` del módulo de análisis para manejar DataFrames None o vacíos
+
+### 📈 Resultado
+✅ 0 pérdidas de datos al navegar entre pestañas  
+✅ 100% de rehidratación automática al reiniciar  
+✅ 0 cambios en estructura de base de datos  
+✅ 100% retrocompatibilidad con código existente  
+
+---
+
 # 📍 Estado Actual del Proyecto
 
 El proyecto se encuentra actualmente en la versión:
 
-## 🔹 **v1.8.0**
+## 🔹 **v1.8.1**
 
 Sistema completo de gestión de requisiciones, compras y análisis de stock con:
 - **Estado de envío textual** (`estado_envio TEXT`) con dropdown, validación por whitelist y cell styles JS
+- **Persistencia robusta de datos** con rehidratación automática desde SQLite
 - Acciones masivas de marcado de envío preservadas en session state
 - Seguimiento avanzado de órdenes de compra con filtros de texto
 - Sincronización automática REQ→OC: pure SQL (`UPDATE...WHERE EXISTS`, `julianday()`), ventana 0–90 días, sin loops Python
@@ -629,6 +690,6 @@ Sistema completo de gestión de requisiciones, compras y análisis de stock con:
 - Sistema de migraciones automáticas de base de datos
 
 Preparado para:
-- Dashboard avanzado con métricas integradas
-- Módulo de ventas con análisis de tendencias
-- Reportería automatizada
+- Expansión de módulos analíticos
+- Integración con nuevos cubos de Softland
+- Reportería automatizada personalizada

@@ -1,14 +1,16 @@
 ﻿# AppKS – Sistema de Gestión Operativa
 
-Sistema web interno desarrollado en Python para gestionar **Requisiciones, Compras, Ventas e Inventario**, eliminando la dependencia de planillas Excel. Procesa cubos exportados desde un ERP (Softland) y centraliza la información en una base de datos SQLite local.
+Sistema web desarrollado en Python para gestionar **Requisiciones, Compras, Ventas e Inventario**, eliminando la dependencia de planillas Excel. Procesa cubos exportados desde un ERP (Softland) y centraliza la información en una base de datos SQLite local.
 
-> **Contexto:** Proyecto desarrollado a partir de necesidades operativas reales identificadas en un entorno de abastecimiento industrial. Actualmente en fase de validación antes de su implementación.
+> **Contexto:** Proyecto desarrollado para KS Seguridad Industrial, Sucursal Talca, a partir de necesidades operativas reales identificadas en el área de abastecimiento.
 
 ---
 
 ## ¿Qué problema resuelve?
 
 En entornos de abastecimiento industrial, el seguimiento de requisiciones y órdenes de compra suele depender de planillas Excel manuales: datos duplicados, sin historial de cambios, sin sincronización entre áreas. AppKS reemplaza ese flujo con una base de datos local, carga automatizada desde el ERP y una interfaz web accesible sin instalación adicional.
+
+Sistema desarrollado para KS Seguridad Industrial, Sucursal Talca.
 
 ---
 
@@ -67,8 +69,8 @@ Arquitectura en capas: **UI → Services → Data Access Layer → SQLite**
 | Requisiciones | ✅ Operativo | Gestión de solicitudes de compra con edición segura inline |
 | Compras | ✅ Operativo | Seguimiento de OC con UPSERT inteligente y filtros avanzados |
 | Análisis Stock | ✅ Operativo | Clasificación de productos por estado de stock y rotación |
-| Ventas | 🔧 En desarrollo | Módulo de ventas con análisis de tendencias |
-| Inventario | 🔧 En desarrollo | Vista de inventario integrada |
+| Ventas | ✅ Operativo | Análisis de tendencias de ventas históricas |
+| Inventario | ✅ Operativo | Vista de inventario integrada con análisis de cobertura |
 
 ---
 
@@ -142,7 +144,7 @@ build.bat
 
 ## Estado actual
 
-**v1.8.0** – En fase de validación
+**v1.8.1** – Sistema completo de gestión operativa
 
 - Arquitectura modular por servicios (UI / Services / DAL)
 - Carga idempotente con clave compuesta para requisiciones y compras
@@ -150,12 +152,11 @@ build.bat
 - Control de versión por hash MD5 en cubos de ventas e inventario
 - Sincronización automática REQ → OC: pure SQL con `UPDATE ... WHERE EXISTS`, `julianday()` para aritmética de fechas, ventana 0–90 días
 - Sincronización gestion → compras: `UPDATE gestion SET ... FROM compras` en un único JOIN pass
-- Índice compuesto `idx_historial_req_fecha` en `historial_cambios(requisicion_id, fecha_cambio DESC)`
-- Módulo Análisis Stock: estado de stock y rotación de productos
+- Módulo Análisis Stock: clasificación por estado de stock y rotación de productos
 - Edición segura inline en 4 capas (UI → validación → backend → triggers SQL)
-- Estados de columna como TEXT con whitelist (`estado_req`, `estado_envio`) — elimina conflictos de tipo entre AG Grid, pandas y SQLite
+- Estados de columna como TEXT con whitelist — elimina conflictos de tipo entre AG Grid, pandas y SQLite
 - Migraciones de esquema automáticas e idempotentes
-- Invalidación completa de caché al eliminar cubos (tablas raw + hashes + session state)
+- Persistencia robusta de datos entre navegaciones con rehidratación automática
 - Launcher `.exe` minimalista (~8 MB)
 
 ---

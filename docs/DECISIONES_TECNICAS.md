@@ -166,3 +166,46 @@ Sin ORM, sin archivos de migración separados, sin historial de versiones de esq
 - Las migraciones son ejecutables múltiples veces sin errores (idempotentes por definición)
 - No hay herramienta de rollback — si una migración es destructiva, se debe hacer backup manual antes
 - Convención del proyecto: nunca eliminar columnas via migración automática; solo agregar o modificar defaults
+
+---
+
+## ADR-007 – Rehidratación automática de datos con `get_or_load_cubo()`
+
+**Estado:** Aceptado  
+**Versión:** v1.8.1  
+
+### Contexto
+Streamlit re-ejecuta el script completo en cada interacción. Los DataFrames cargados se almacenan en `session_state`, pero al navegar entre pestañas o eliminar cubos, las claves podían quedar con valor `None`, y la lógica de inicialización solo verificaba `if key not in session_state`, sin considerar el caso de valores `None`.
+
+### Decisión
+Implementar `get_or_load_cubo(nombre_cubo)` como punto único de acceso a cubos de datos, con lógica robusta:
+
+```python
+def get_or_load_cubo(nombre_cubo: str) -> Optional[pd.DataFrame]:
+    session_key = f"cubo_{nombre_cubo}"
+    
+    # Validar si existe en session_state Y no es None
+    if session_key in st.session_state and st.session_state[session_key] is not None:
+        df = st.session_state[session_key]
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
+    
+    # Rehidratar desde SQLite
+    df = cargar_cubo_raw(nombre_cubo)
+    st.session_state[session_key] = df
+    return df
+```
+
+Además, modificar `inicializar_session_state()` para cargar cubos si NO existen O si son `None`:
+
+```python
+if key not in st.session_state or st.session_state[key] is None:
+    st.session_state[key] = db.cargar_cubo_raw(cubo)
+```
+
+### Consecuencias
+- Los datos persisten automáticamente entre navegaciones de pestañas
+- La rehidratación ocurre bajo demanda sin cargas innecesarias
+- Punto único de acceso facilita debugging y mantenimiento
+- Eliminar cubos requiere `.pop()` en lugar de asignación `= None`
+- Compatible con arquitectura existente sin cambios en BD

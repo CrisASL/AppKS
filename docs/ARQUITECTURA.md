@@ -4,6 +4,8 @@
 
 AppKS es una aplicación web local construida sobre **Streamlit + SQLite**. Procesa cubos Excel exportados desde Softland ERP y centraliza la información en una base de datos local, eliminando la dependencia de planillas manuales.
 
+Desarrollado para KS Seguridad Industrial, Sucursal Talca.
+
 ---
 
 ## 🧱 Stack Tecnológico
@@ -152,6 +154,7 @@ AppKS/
 - Inicialización de esquema, índices y triggers al arrancar
 - **`actualizar_requisiciones_desde_compras()`**: sincronización REQ→OC mediante un único `UPDATE ... WHERE EXISTS` con subconsultas correlacionadas y `julianday()` para aritmética de fechas (ventana 0–90 días, cantidad OC ≥ 80% de REQ, selecciona OC más cercana en el tiempo)
 - **`cargar_requisiciones_desde_cubo()`**: `INSERT OR IGNORE` con `UNIQUE(numreq, codprod)`; sin pre-SELECT de tabla completa
+- **`get_or_load_cubo()`**: rehidratación automática de cubos desde SQLite con validación robusta
 - Migraciones idempotentes: `migrar_base_datos_existente()`, ejecutable múltiples veces al arrancar
 - Limpieza de cubos: `limpiar_cubo_*()` elimina tablas operacionales + raw + hashes
 
@@ -224,12 +227,12 @@ Excel (Softland ERP)
 | Control de versión por hash MD5 | `ventas_inventario_service.py`, `database.py` |
 | Sincronización REQ→OC pure SQL (`UPDATE...WHERE EXISTS`, `julianday()`) | `database.py` → `actualizar_requisiciones_desde_compras()` |
 | Sincronización gestion→compras con JOIN único (`UPDATE...FROM`) | `compras_service.py` → `actualizar_gestion_desde_compras()` |
+| Rehidratación automática de datos | `database.py` → `get_or_load_cubo()` |
 | Context manager para conexiones | Todos los módulos de BD |
 | Migraciones incrementales idempotentes | `database.py` → `migrar_base_datos_existente()` |
 | Session state para persistencia de UI | `main.py` |
 | Separación service / view | `modules/analisis_stock/` |
 | Invalidación de caché en limpieza | `main.py` → `st.cache_data.clear()` + loop `session_state` + `st.rerun()` |
-| Conteo real sin caché | `main.py` → `_contar_registros_db(tabla)` via `sqlite3` directo |
 | Override masivo de estado via session state | `main.py` → `estado_envio_override` / `st.rerun()` |
 | Edición segura en 4 capas | UI → `utils.py` → `CAMPOS_EDITABLES_UI` (backend) → triggers SQL |
 

@@ -11,54 +11,56 @@ from app.modules.analisis_stock import service
 # ── Configuración visual ──────────────────────────────────────────────────────
 
 _ICONO_ESTADO = {
-    'Falta de stock': '🔴',
-    'Stock óptimo':   '🟢',
-    'Sobrestock':     '🟡',
+    "Falta de stock": "🔴",
+    "Stock óptimo": "🟢",
+    "Sobrestock": "🟡",
 }
 
 _ICONO_ROTACION = {
-    'Alta rotación':  '🔥',
-    'Rotación media': '🔄',
-    'Baja rotación':  '❄️',
+    "Alta rotación": "🔥",
+    "Rotación media": "🔄",
+    "Baja rotación": "❄️",
 }
 
 _ORDEN_OPCIONES = {
-    'ventas_mes_actual_anio_anterior':    '📦 Ventas mes actual (año ant.)',
-    'ventas_mes_siguiente_anio_anterior': '📦 Ventas mes siguiente (año ant.)',
-    'stock_actual':                       '📊 Stock actual',
-    'stock_objetivo':                     '🎯 Stock objetivo',
-    'meses_con_venta':                    '📅 Meses con venta',
-    'codprod':                            '🔤 Código producto',
+    "ventas_mes_actual_anio_anterior": "📦 Ventas mes actual (año ant.)",
+    "ventas_mes_siguiente_anio_anterior": "📦 Ventas mes siguiente (año ant.)",
+    "stock_actual": "📊 Stock actual",
+    "stock_objetivo": "🎯 Stock objetivo",
+    "meses_con_venta": "📅 Meses con venta",
+    "codprod": "🔤 Código producto",
 }
 
 
 # ── Funciones auxiliares ──────────────────────────────────────────────────────
 
+
 def _metricas_resumen(df: pd.DataFrame) -> None:
     """Muestra las métricas de resumen en la parte superior."""
-    total   = len(df)
-    falta   = (df['estado_stock'] == 'Falta de stock').sum()
-    optimo  = (df['estado_stock'] == 'Stock óptimo').sum()
-    sobre   = (df['estado_stock'] == 'Sobrestock').sum()
-    alta    = (df['rotacion'] == 'Alta rotación').sum()
-    media   = (df['rotacion'] == 'Rotación media').sum()
-    baja    = (df['rotacion'] == 'Baja rotación').sum()
+    total = len(df)
+    falta = (df["estado_stock"] == "Falta de stock").sum()
+    optimo = (df["estado_stock"] == "Stock óptimo").sum()
+    sobre = (df["estado_stock"] == "Sobrestock").sum()
+    alta = (df["rotacion"] == "Alta rotación").sum()
+    media = (df["rotacion"] == "Rotación media").sum()
+    baja = (df["rotacion"] == "Baja rotación").sum()
 
     st.markdown("**Estado de stock**")
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total productos",  total)
+    c1.metric("Total productos", total)
     c2.metric("🔴 Falta de stock", falta)
-    c3.metric("🟢 Stock óptimo",   optimo)
-    c4.metric("🟡 Sobrestock",     sobre)
+    c3.metric("🟢 Stock óptimo", optimo)
+    c4.metric("🟡 Sobrestock", sobre)
 
     st.markdown("**Rotación de productos**")
     r1, r2, r3, _ = st.columns(4)
-    r1.metric("🔥 Alta rotación",  alta)
+    r1.metric("🔥 Alta rotación", alta)
     r2.metric("🔄 Rotación media", media)
-    r3.metric("❄️ Baja rotación",  baja)
+    r3.metric("❄️ Baja rotación", baja)
 
 
 # ── Función principal de renderizado ─────────────────────────────────────────
+
 
 def render(cubo_inventario: pd.DataFrame, cubo_ventas: pd.DataFrame) -> None:
     """
@@ -68,9 +70,27 @@ def render(cubo_inventario: pd.DataFrame, cubo_ventas: pd.DataFrame) -> None:
         cubo_inventario: DataFrame del cubo de inventario (desde session_state).
         cubo_ventas:     DataFrame del cubo de ventas (desde session_state).
     """
+    # ── Validación defensiva ─────────────────────────────────────────────────
+    if cubo_inventario is None or cubo_ventas is None:
+        st.error(
+            "❌ No se pudieron cargar los datos necesarios.\n\n"
+            "Ve a **📥 Cargar Cubos** para subir los archivos de inventario y ventas."
+        )
+        return
+
+    if not isinstance(cubo_inventario, pd.DataFrame) or cubo_inventario.empty:
+        st.error("❌ El cubo de inventario está vacío o no es válido.")
+        return
+
+    if not isinstance(cubo_ventas, pd.DataFrame) or cubo_ventas.empty:
+        st.error("❌ El cubo de ventas está vacío o no es válido.")
+        return
+
+    # ── Renderizado normal ────────────────────────────────────────────────────
     from app.modules.analisis_stock.service import _mes_actual_col, _mes_siguiente_col
-    mes_actual_label  = _mes_actual_col().upper()
-    mes_sig_label     = _mes_siguiente_col().upper()
+
+    mes_actual_label = _mes_actual_col().upper()
+    mes_sig_label = _mes_siguiente_col().upper()
 
     st.subheader("📦 Inventario vs Ventas — KS Talca")
     st.caption(
@@ -104,10 +124,12 @@ def render(cubo_inventario: pd.DataFrame, cubo_ventas: pd.DataFrame) -> None:
     filtro_desc = st.text_input(
         "🔍 Buscar producto",
         placeholder="Escribe parte del nombre o descripción...",
-        key="analisis_stock_buscar"
+        key="analisis_stock_buscar",
     )
     if filtro_desc:
-        df = df[df['desprod'].astype(str).str.contains(filtro_desc, case=False, na=False)]
+        df = df[
+            df["desprod"].astype(str).str.contains(filtro_desc, case=False, na=False)
+        ]
 
     # ── Controles de ordenamiento y filtro ────────────────────────────────────
     col_ord, col_filt_estado, col_filt_rot = st.columns([2, 3, 3])
@@ -117,44 +139,41 @@ def render(cubo_inventario: pd.DataFrame, cubo_ventas: pd.DataFrame) -> None:
             "Ordenar por",
             options=list(_ORDEN_OPCIONES.keys()),
             format_func=lambda x: _ORDEN_OPCIONES[x],
-            key="analisis_stock_orden"
+            key="analisis_stock_orden",
         )
 
     with col_filt_estado:
-        estados_disponibles = sorted(df['estado_stock'].unique().tolist())
+        estados_disponibles = sorted(df["estado_stock"].unique().tolist())
         estados_sel = st.multiselect(
             "Filtrar por estado de stock",
             options=estados_disponibles,
             default=estados_disponibles,
-            key="analisis_stock_filtro_estado"
+            key="analisis_stock_filtro_estado",
         )
 
     with col_filt_rot:
-        rotaciones_disponibles = sorted(df['rotacion'].unique().tolist())
+        rotaciones_disponibles = sorted(df["rotacion"].unique().tolist())
         rotaciones_sel = st.multiselect(
             "Filtrar por rotación",
             options=rotaciones_disponibles,
             default=rotaciones_disponibles,
-            key="analisis_stock_filtro_rotacion"
+            key="analisis_stock_filtro_rotacion",
         )
 
     # ── Aplicar filtros y ordenamiento ────────────────────────────────────────
-    ascendente = (orden == 'codprod')    # Solo código se ordena A→Z
+    ascendente = orden == "codprod"  # Solo código se ordena A→Z
     df_vista = (
-        df[
-            df['estado_stock'].isin(estados_sel) &
-            df['rotacion'].isin(rotaciones_sel)
-        ]
+        df[df["estado_stock"].isin(estados_sel) & df["rotacion"].isin(rotaciones_sel)]
         .sort_values(orden, ascending=ascendente)
         .reset_index(drop=True)
         .copy()
     )
 
     # Aplicar íconos para la visualización
-    df_vista['estado_stock'] = df_vista['estado_stock'].map(
+    df_vista["estado_stock"] = df_vista["estado_stock"].map(
         lambda v: f"{_ICONO_ESTADO.get(v, '⚪')} {v}"
     )
-    df_vista['rotacion'] = df_vista['rotacion'].map(
+    df_vista["rotacion"] = df_vista["rotacion"].map(
         lambda v: f"{_ICONO_ROTACION.get(v, '')} {v}"
     )
 
@@ -163,16 +182,24 @@ def render(cubo_inventario: pd.DataFrame, cubo_ventas: pd.DataFrame) -> None:
         df_vista,
         use_container_width=True,
         column_config={
-            'codprod':                           st.column_config.TextColumn('Código',              width='small'),
-            'desprod':                           st.column_config.TextColumn('Descripción',         width='large'),
-            'ventas_mes_actual_anio_anterior':   st.column_config.NumberColumn(f'Vtas {mes_actual_label} ant.', format='%d'),
-            'ventas_mes_siguiente_anio_anterior':st.column_config.NumberColumn(f'Vtas {mes_sig_label} ant.',    format='%d'),
-            'stock_actual':                      st.column_config.NumberColumn('Stock Actual',      format='%d'),
-            'stock_objetivo':                    st.column_config.NumberColumn('Stock Objetivo',    format='%d'),
-            'estado_stock':                      st.column_config.TextColumn('Estado Stock',        width='medium'),
-            'meses_con_venta':                   st.column_config.NumberColumn('Meses c/venta',    format='%d'),
-            'rotacion':                          st.column_config.TextColumn('Rotación',            width='medium'),
-        }
+            "codprod": st.column_config.TextColumn("Código", width="small"),
+            "desprod": st.column_config.TextColumn("Descripción", width="large"),
+            "ventas_mes_actual_anio_anterior": st.column_config.NumberColumn(
+                f"Vtas {mes_actual_label} ant.", format="%d"
+            ),
+            "ventas_mes_siguiente_anio_anterior": st.column_config.NumberColumn(
+                f"Vtas {mes_sig_label} ant.", format="%d"
+            ),
+            "stock_actual": st.column_config.NumberColumn("Stock Actual", format="%d"),
+            "stock_objetivo": st.column_config.NumberColumn(
+                "Stock Objetivo", format="%d"
+            ),
+            "estado_stock": st.column_config.TextColumn("Estado Stock", width="medium"),
+            "meses_con_venta": st.column_config.NumberColumn(
+                "Meses c/venta", format="%d"
+            ),
+            "rotacion": st.column_config.TextColumn("Rotación", width="medium"),
+        },
     )
 
     st.caption(f"Mostrando **{len(df_vista)}** de **{len(df)}** productos.")

@@ -58,19 +58,23 @@ st.set_page_config(**config.PAGE_CONFIG)
 
 
 def inicializar_session_state():
-    """Inicializa variables de sesión de Streamlit."""
-    if "cubo_requisiciones" not in st.session_state:
-        st.session_state.cubo_requisiciones = db.cargar_cubo_raw("requisiciones")
+    """
+    Inicializa variables de sesión de Streamlit.
 
-    if "cubo_compras" not in st.session_state:
-        st.session_state.cubo_compras = db.cargar_cubo_raw("compras")
+    REHIDRATACIÓN ROBUSTA:
+    - Carga desde SQLite si la clave NO existe O si el valor es None
+    - Previene pérdida de datos al cambiar de pestaña
+    - Compatible con arquitectura actual (sin cambios en BD)
+    """
+    # ── Cubos de datos (rehidratación robusta) ───────────────────────────────
+    for cubo in ["requisiciones", "compras", "ventas", "inventario"]:
+        key = f"cubo_{cubo}"
 
-    if "cubo_ventas" not in st.session_state:
-        st.session_state.cubo_ventas = db.cargar_cubo_raw("ventas")
+        # Condición robusta: cargar si NO existe O es None
+        if key not in st.session_state or st.session_state[key] is None:
+            st.session_state[key] = db.cargar_cubo_raw(cubo)
 
-    if "cubo_inventario" not in st.session_state:
-        st.session_state.cubo_inventario = db.cargar_cubo_raw("inventario")
-
+    # ── Variables de navegación ───────────────────────────────────────────────
     if "pagina_actual" not in st.session_state:
         st.session_state.pagina_actual = "📊 Dashboard"
 
@@ -253,7 +257,8 @@ def _widget_cubo_uploader(
     if getattr(st.session_state, session_key) is not None and archivo is None:
         _count = _contar_registros_db(tipo)
         if _count == 0:
-            setattr(st.session_state, session_key, None)
+            # ⚠️ Eliminar clave (no asignar None) para forzar rehidratación
+            st.session_state.pop(session_key, None)
             st.warning(warning_msg)
         else:
             st.info(
@@ -1759,25 +1764,27 @@ def pagina_seguimiento_oc():
 
 
 def pagina_analisis_stock():
-    """Página para análisis de stock vs ventas — KS Talca."""
+    """Página de análisis de stock (inventario vs ventas)."""
     st.title("📈 Análisis de Stock")
 
-    cubos_faltantes = []
-    if st.session_state.cubo_inventario is None:
-        cubos_faltantes.append("📦 Cubo de Inventario")
-    if st.session_state.cubo_ventas is None:
-        cubos_faltantes.append("📊 Cubo de Ventas")
+    # ── Validación defensiva con rehidratación automática ────────────────────
+    cubo_inventario = db.get_or_load_cubo("inventario")
+    cubo_ventas = db.get_or_load_cubo("ventas")
 
-    if cubos_faltantes:
+    # Validar que ambos cubos existan y no sean None
+    if cubo_inventario is None or cubo_ventas is None:
         st.warning(
-            "⚠️ Para ver este análisis debes cargar los siguientes cubos en el Dashboard:\n\n"
-            + "\n".join(f"- {c}" for c in cubos_faltantes)
+            "⚠️ Faltan datos necesarios para el análisis de stock.\n\n"
+            "**Requisitos:**\n"
+            "- ✅ Cubo de Inventario\n"
+            "- ✅ Cubo de Ventas\n\n"
+            "Ve a **📥 Cargar Cubos** para subir los archivos necesarios."
         )
         return
 
     analisis_stock_view.render(
-        cubo_inventario=st.session_state.cubo_inventario,
-        cubo_ventas=st.session_state.cubo_ventas,
+        cubo_inventario=cubo_inventario,
+        cubo_ventas=cubo_ventas,
     )
 
 

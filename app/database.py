@@ -387,6 +387,47 @@ def cargar_cubo_raw(nombre_cubo: str) -> Optional[pd.DataFrame]:
         return None
 
 
+def get_or_load_cubo(nombre_cubo: str) -> Optional[pd.DataFrame]:
+    """
+    Función centralizada para obtener un cubo desde session_state o rehidratarlo desde SQLite.
+
+    Estrategia robusta de persistencia:
+    1. Si existe en session_state Y no es None → devolverlo directamente
+    2. Si es None o no existe → cargar desde SQLite
+    3. Actualizar session_state con el resultado
+    4. Retornar DataFrame (o None si no hay datos)
+
+    Args:
+        nombre_cubo: 'requisiciones', 'compras', 'ventas' o 'inventario'
+
+    Returns:
+        DataFrame cargado (desde memoria o SQLite), o None si no hay datos disponibles
+
+    Ejemplo de uso:
+        >>> df_inventario = db.get_or_load_cubo('inventario')
+        >>> if df_inventario is not None:
+        >>>     procesar_datos(df_inventario)
+    """
+    import streamlit as st
+
+    session_key = f"cubo_{nombre_cubo}"
+
+    # Validar si existe en session_state Y no es None
+    if session_key in st.session_state and st.session_state[session_key] is not None:
+        df = st.session_state[session_key]
+        # Validación defensiva: verificar que sea DataFrame válido
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return df
+
+    # Rehidratar desde SQLite
+    df = cargar_cubo_raw(nombre_cubo)
+
+    # Actualizar session_state (None si no hay datos, DataFrame si existen)
+    st.session_state[session_key] = df
+
+    return df
+
+
 def migrar_base_datos_existente():
     """
     Migra bases de datos existentes para agregar nuevos campos y constraints.

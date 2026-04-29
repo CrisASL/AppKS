@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import os
 
-from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, JsCode
+from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode, JsCode
 
 # Importar módulos del proyecto
 from app import config
@@ -19,6 +19,7 @@ from app import database as db
 from app import utils
 from app.cache import get_table, invalidar_cache
 from app.services import compras_service
+from app.services import check_consistencia
 from app.modules.analisis_stock import view as analisis_stock_view
 
 
@@ -32,24 +33,25 @@ os.makedirs(config.BACKUP_PATH, exist_ok=True)
 os.makedirs(config.EXPORT_PATH, exist_ok=True)
 os.makedirs(config.LOG_PATH, exist_ok=True)
 
-# Inicializar base de datos (crea tablas si no existen)
-try:
-    db.inicializar_base_datos()
-except Exception as e:
-    st.error(f"Error al inicializar base de datos: {str(e)}")
-
-# Ejecutar migración (agrega campos nuevos si es BD existente)
-try:
-    db.migrar_base_datos_existente()
-except Exception as e:
-    st.warning(f"Advertencia durante migración: {str(e)}")
-
 
 # ============================================================================
 # CONFIGURACIÓN DE PÁGINA
 # ============================================================================
 
+# set_page_config debe ser la PRIMERA llamada a Streamlit, antes de cualquier st.*
 st.set_page_config(**config.PAGE_CONFIG)
+
+# Inicializar base de datos — errores se acumulan y se muestran en main()
+_startup_errors: list = []
+try:
+    db.inicializar_base_datos()
+except Exception as e:
+    _startup_errors.append(("error", f"Error al inicializar base de datos: {str(e)}"))
+
+try:
+    db.migrar_base_datos_existente()
+except Exception as e:
+    _startup_errors.append(("warning", f"Advertencia durante migración: {str(e)}"))
 
 
 # ============================================================================
@@ -62,24 +64,20 @@ def inicializar_session_state():
     Inicializa variables de sesión de Streamlit.
 
     REHIDRATACIÓN ROBUSTA:
-    - Carga desde SQLite si la clave NO existe O si el valor es None
-    - Previene pérdida de datos al cambiar de pestaña
-    - Compatible con arquitectura actual (sin cambios en BD)
+    - Carga cubos desde SQLite si la clave NO existe O si el valor es None
+    - Inicializa todas las claves de UI desde STATE_KEYS (una sola vez, al arrancar)
+    - Previene pérdida de filtros al cambiar de módulo
     """
     # ── Cubos de datos (rehidratación robusta) ───────────────────────────────
     for cubo in ["requisiciones", "compras", "ventas", "inventario"]:
         key = f"cubo_{cubo}"
-
-        # Condición robusta: cargar si NO existe O es None
         if key not in st.session_state or st.session_state[key] is None:
             st.session_state[key] = db.cargar_cubo_raw(cubo)
 
-    # ── Variables de navegación ───────────────────────────────────────────────
-    if "pagina_actual" not in st.session_state:
-        st.session_state.pagina_actual = "📊 Dashboard"
-
-    if "datos_cargados" not in st.session_state:
-        st.session_state.datos_cargados = False
+    # ── Todas las claves de UI — defaults centralizados en STATE_KEYS ─────────
+    for key, default in utils.STATE_KEYS.items():
+        if key not in st.session_state:
+            st.session_state[key] = default
 
 
 inicializar_session_state()
@@ -235,6 +233,7 @@ def _widget_cubo_uploader(
     info_msg_prefix,
     excel_key_prefix,
     post_save_fn=None,
+    pre_save_validator=None,
 ):
     """Widget reutilizable para cargar un cubo Excel.
 
@@ -254,7 +253,7 @@ def _widget_cubo_uploader(
     )
 
     # Indicador de estado persistido
-    if getattr(st.session_state, session_key) is not None and archivo is None:
+    if getattr(st.session_state, session_key, None) is not None and archivo is None:
         _count = _contar_registros_db(tipo)
         if _count == 0:
             # ⚠️ Eliminar clave (no asignar None) para forzar rehidratación
@@ -270,6 +269,20 @@ def _widget_cubo_uploader(
         hash_guardado = db.obtener_configuracion(f"hash_cubo_{tipo}")
 
         def _guardar_y_notificar(df, es_nuevo):
+            # ── Validación de filas antes de guardar ─────────────────────────
+            if pre_save_validator is not None:
+                es_valido, errores_val = pre_save_validator(df)
+                if not es_valido:
+                    st.error(
+                        f"❌ Excel inválido — {len(errores_val)} error(es) encontrado(s). "
+                        "No se insertó ningún registro."
+                    )
+                    st.dataframe(
+                        pd.DataFrame(errores_val),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    return
             insertadas = errores = 0
             mensajes = []
             with st.spinner(spinner_msg):
@@ -295,19 +308,19 @@ def _widget_cubo_uploader(
         if hash_nuevo == hash_guardado:
             df_sqlite = db.cargar_cubo_raw(tipo)
             if df_sqlite is not None:
-                setattr(st.session_state, session_key, df_sqlite)
+                st.session_state[session_key] = df_sqlite
                 st.info(
                     f"ℹ️ Archivo sin cambios — datos cargados desde base de datos ({len(df_sqlite)} registros)"
                 )
             else:
                 df = cargar_cubo_excel(archivo, tipo, excel_key_prefix)
                 if df is not None:
-                    setattr(st.session_state, session_key, df)
+                    st.session_state[session_key] = df
                     _guardar_y_notificar(df, es_nuevo=True)
         else:
             df = cargar_cubo_excel(archivo, tipo, excel_key_prefix)
             if df is not None:
-                setattr(st.session_state, session_key, df)
+                st.session_state[session_key] = df
                 _guardar_y_notificar(df, es_nuevo=False)
 
     return archivo
@@ -332,6 +345,7 @@ def seccion_carga_cubos():
             info_msg_prefix="Requisiciones",
             excel_key_prefix="req",
             post_save_fn=db.cargar_requisiciones_desde_cubo,
+            pre_save_validator=utils.validar_filas_requisiciones,
         )
 
         st.markdown("---")
@@ -667,7 +681,7 @@ def pagina_dashboard():
             st.info("No hay datos de requisiciones aún")
 
     with col_right:
-        st.subheader("🏆 Top 10 Productos — Último Mes")
+        st.subheader("🏆 Top 10 Productos — Últimos 30 Días")
 
         df_productos = db.obtener_top_productos_ultimo_mes(10)
 
@@ -823,28 +837,6 @@ def tabla_listado_requisiciones():
         unsafe_allow_html=True,
     )
 
-    # Inicializar filtros en session_state si no existen
-    if "filtro_req_estado" not in st.session_state:
-        st.session_state.filtro_req_estado = []
-    if "filtro_req_fecha_desde" not in st.session_state:
-        st.session_state.filtro_req_fecha_desde = None
-    if "filtro_req_fecha_hasta" not in st.session_state:
-        st.session_state.filtro_req_fecha_hasta = None
-    if "filtro_req_solo_pendientes" not in st.session_state:
-        st.session_state.filtro_req_solo_pendientes = False
-    if "filtro_req_numreq" not in st.session_state:
-        st.session_state.filtro_req_numreq = ""
-    if "filtro_req_codprod" not in st.session_state:
-        st.session_state.filtro_req_codprod = ""
-    if "filtro_req_desprod" not in st.session_state:
-        st.session_state.filtro_req_desprod = ""
-    if "filtro_req_proveedor" not in st.session_state:
-        st.session_state.filtro_req_proveedor = []
-    if "oc_enviada_override" not in st.session_state:
-        st.session_state.oc_enviada_override = None
-    if "estado_envio_override" not in st.session_state:
-        st.session_state.estado_envio_override = None
-
     # Filtros
     with st.expander("🔍 Filtros", expanded=False):
         st.caption(
@@ -935,14 +927,7 @@ def tabla_listado_requisiciones():
         if st.button(
             "🔄 Limpiar Filtros", type="secondary", key="btn_limpiar_filtros_req"
         ):
-            st.session_state.filtro_req_estado = []
-            st.session_state.filtro_req_fecha_desde = None
-            st.session_state.filtro_req_fecha_hasta = None
-            st.session_state.filtro_req_solo_pendientes = False
-            st.session_state.filtro_req_numreq = ""
-            st.session_state.filtro_req_codprod = ""
-            st.session_state.filtro_req_desprod = ""
-            st.session_state.filtro_req_proveedor = []
+            utils.reset_filters("req")
             st.rerun()
 
     # Construir filtros para consulta
@@ -1057,11 +1042,8 @@ def tabla_listado_requisiciones():
     # ── Guardar estado original para comparación al guardar ────────────────
     df_preparado = utils.preparar_df_para_edicion_segura(df_requisiciones)
 
-    if "df_req_original" not in st.session_state or st.session_state.get(
-        "reload_req_data", False
-    ):
+    if "df_req_original" not in st.session_state:
         st.session_state.df_req_original = df_preparado.copy()
-        st.session_state.reload_req_data = False
 
     # ── Preparar DataFrame para AG Grid ────────────────────────────────────
     COLUMNAS_VISIBLES = [
@@ -1252,18 +1234,38 @@ def tabla_listado_requisiciones():
         unsafe_allow_html=True,
     )
 
+    # Key dinámico: cambia cuando los filtros activos o el tamaño del DataFrame cambian,
+    # evitando que AG Grid mezcle ediciones pendientes entre búsquedas distintas.
+    _filtros_str = (
+        str(sorted(filtros.items()))
+        + str(filtro_desprod)
+        + str(filtro_proveedor)
+        + str(len(df_grid))
+    )
+    _grid_key = f"aggrid_req_{abs(hash(_filtros_str)) % 1_000_000}"
+
+    # Resetear baseline si cambiaron los filtros (nueva instancia de grilla)
+    # o si se pidió recarga explícita con "Recargar Datos"
+    if (
+        st.session_state.get("reload_req_data", False)
+        or st.session_state.get("_last_grid_key_req") != _grid_key
+    ):
+        st.session_state.df_req_original = df_preparado.copy()
+        st.session_state.reload_req_data = False
+    st.session_state._last_grid_key_req = _grid_key
+
     # Renderizar AG Grid con tema Alpine Dark
     grid_response = AgGrid(
         df_grid,
         gridOptions=grid_options,
-        update_on=["cellValueChanged"],
+        update_mode=GridUpdateMode.MODEL_CHANGED,
         data_return_mode=DataReturnMode.AS_INPUT,
         fit_columns_on_grid_load=True,
         enable_enterprise_modules=False,
         theme="alpine-dark",
         height=500,
         use_container_width=True,
-        key="aggrid_requisiciones",
+        key=_grid_key,
         allow_unsafe_jscode=True,
     )
 
@@ -1300,8 +1302,6 @@ def tabla_listado_requisiciones():
     # DataFrame con las ediciones del usuario
     df_editado_raw = grid_response["data"]
 
-    # Normalizar estado_envio: AG Grid devuelve siempre strings con agSelectCellEditor.
-    # Asegurar que el valor sea uno de los permitidos; si no, usar el valor por defecto.
     df_editado_grid = pd.DataFrame(df_editado_raw)
     if "estado_envio" in df_editado_grid.columns:
         df_editado_grid["estado_envio"] = (
@@ -1311,14 +1311,17 @@ def tabla_listado_requisiciones():
             .apply(lambda v: v if v in config.ESTADOS_ENVIO else "No Enviado")
         )
 
-    # Combinar ediciones de la grid con columnas no visibles de df_preparado
-    cols_solo_grid = [c for c in df_editado_grid.columns if c in df_preparado.columns]
-    df_editado = df_preparado.copy()
-    df_editado.update(
-        df_editado_grid[cols_solo_grid].set_index("id")
-        if "id" in cols_solo_grid
-        else df_editado_grid[cols_solo_grid]
-    )
+    # Construir df_editado alineando por 'id'.
+    # Bug anterior: df_preparado tiene índice entero (0,1,2...) y
+    # df_editado_grid.set_index("id") tiene IDs reales → update() no alineaba nada.
+    _cols_edit = [
+        c for c in df_editado_grid.columns
+        if c in df_preparado.columns and c != "id"
+    ]
+    df_editado = df_preparado.set_index("id").copy()
+    if _cols_edit and "id" in df_editado_grid.columns:
+        df_editado.update(df_editado_grid.set_index("id")[_cols_edit])
+    df_editado = df_editado.reset_index()
 
     st.markdown("---")
 
@@ -1409,25 +1412,8 @@ def pagina_seguimiento_oc():
     """Página para seguimiento de órdenes de compra."""
     st.title("🛒 Seguimiento de Órdenes de Compra")
 
-    # Inicializar filtros en session_state si no existen
-    if "filtro_oc_seleccionada" not in st.session_state:
-        st.session_state.filtro_oc_seleccionada = "Todas"
-    if "filtro_estado_seleccionado" not in st.session_state:
-        st.session_state.filtro_estado_seleccionado = "Todos"
-    if "filtro_buscar_producto" not in st.session_state:
-        st.session_state.filtro_buscar_producto = ""
-    if "filtro_observacion" not in st.session_state:
-        st.session_state.filtro_observacion = ""
-    if "filtro_oc_desprod" not in st.session_state:
-        st.session_state.filtro_oc_desprod = ""
-    if "filtro_oc_proveedor" not in st.session_state:
-        st.session_state.filtro_oc_proveedor = []
-
     # Verificar si existe la tabla de compras
     try:
-        # Ejecutar migración para asegurar que desprod existe
-        compras_service.migrar_tabla_compras_agregar_desprod()
-
         with compras_service.get_db_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -1604,13 +1590,8 @@ def pagina_seguimiento_oc():
                 st.session_state.filtro_oc_proveedor = filtro_oc_proveedor
 
             # Botón para limpiar filtros
-            if st.button("🔄 Limpiar Filtros", type="secondary"):
-                st.session_state.filtro_oc_seleccionada = "Todas"
-                st.session_state.filtro_estado_seleccionado = "Todos"
-                st.session_state.filtro_buscar_producto = ""
-                st.session_state.filtro_observacion = ""
-                st.session_state.filtro_oc_desprod = ""
-                st.session_state.filtro_oc_proveedor = []
+            if st.button("🔄 Limpiar Filtros", type="secondary", key="btn_limpiar_oc"):
+                utils.reset_filters("oc")
                 st.rerun()
 
             st.markdown("---")
@@ -1797,12 +1778,13 @@ def pagina_configuracion():
     """Página de configuración y utilidades."""
     st.title("⚙️ Configuración")
 
-    tab1, tab2, tab3, tab4 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
         [
             "💾 Backup",
             "📊 Información del Sistema",
             "📋 Historial de Cargas",
             "🗑️ Limpiar Datos",
+            "🔍 Diagnóstico",
         ]
     )
 
@@ -1824,6 +1806,11 @@ def pagina_configuracion():
 
                 # Verificar que existe la carpeta de backups
                 os.makedirs(config.BACKUP_PATH, exist_ok=True)
+
+                # Forzar checkpoint WAL para que el .db esté completo antes de copiar
+                import sqlite3 as _sqlite3_bk
+                with _sqlite3_bk.connect(config.DB_PATH) as _conn_wal:
+                    _conn_wal.execute("PRAGMA wal_checkpoint(FULL)")
 
                 # Copiar archivo
                 shutil.copy2(ruta_origen, ruta_destino)
@@ -1896,7 +1883,7 @@ def pagina_configuracion():
         with col1:
             st.metric("Total Requisiciones", len(df_req))
         with col2:
-            st.metric("Productos Únicos", stats["productos_pendientes"])
+            st.metric("Productos con Saldo Pendiente", stats["productos_pendientes"])
         with col3:
             st.metric("REQ Pendientes", stats["req_pendientes"])
         with col4:
@@ -1999,9 +1986,7 @@ def pagina_configuracion():
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            st.metric(
-                "Total Requisiciones", stats["req_pendientes"] + stats["oc_transito"]
-            )
+            st.metric("Total Requisiciones", stats["total_req"])
 
         with col2:
             st.metric("REQ Pendientes", stats["req_pendientes"])
@@ -2010,7 +1995,7 @@ def pagina_configuracion():
             st.metric("OC en Tránsito", stats["oc_transito"])
 
         with col4:
-            st.metric("Productos Únicos", stats["productos_pendientes"])
+            st.metric("Productos con Saldo Pendiente", stats["productos_pendientes"])
 
         st.markdown("---")
 
@@ -2194,6 +2179,151 @@ def pagina_configuracion():
                 "⚠️ Marca la casilla de confirmación para habilitar el botón de limpieza total"
             )
 
+    with tab5:
+        st.subheader("🔍 Diagnóstico de Consistencia de Datos")
+        st.markdown(
+            "Detecta inconsistencias entre **Requisiciones** y **Compras**. "
+            "Solo lectura — no modifica datos."
+        )
+        st.markdown("""
+| Check | Qué detecta |
+|---|---|
+| OC sin REQ | Órdenes de compra sin requisición asociada |
+| REQ sin OC (+14d) | Requisiciones antiguas sin OC, guía ni observación |
+| Montos descuadrados | `total_linea ≠ precio × cantidad` (diferencia > $1) |
+| Recepciones excedidas | Cantidad recibida > cantidad solicitada |
+""")
+
+        if st.button("🔍 Ejecutar Diagnóstico", type="primary", key="btn_diagnostico"):
+            with st.spinner("Analizando consistencia..."):
+                diag = check_consistencia.ejecutar_diagnostico()
+
+            if "error" in diag:
+                st.error(f"❌ Error al ejecutar diagnóstico: {diag['error']}")
+            elif not diag["tiene_req"] and not diag["tiene_compras"]:
+                st.warning(
+                    "⚠️ No hay datos cargados. "
+                    "Importa los cubos de Requisiciones y Compras primero."
+                )
+            else:
+                st.caption(f"Ejecutado: {diag['timestamp']}")
+
+                r = diag["resumen"]
+
+                # ── Métricas resumen ──────────────────────────────────────────
+                col_d1, col_d2, col_d3, col_d4 = st.columns(4)
+                with col_d1:
+                    lbl = "🔴 OC sin REQ" if r["oc_sin_req"] > 0 else "✅ OC sin REQ"
+                    st.metric(lbl, r["oc_sin_req"])
+                with col_d2:
+                    lbl = "🔴 REQ sin OC (+14d)" if r["req_sin_oc"] > 0 else "✅ REQ sin OC (+14d)"
+                    st.metric(lbl, r["req_sin_oc"])
+                with col_d3:
+                    lbl = "🟡 Montos desc." if r["montos_descuadrados"] > 0 else "✅ Montos desc."
+                    st.metric(lbl, r["montos_descuadrados"])
+                with col_d4:
+                    lbl = "🟡 Recep. excedidas" if r["recepciones_excedidas"] > 0 else "✅ Recep. excedidas"
+                    st.metric(lbl, r["recepciones_excedidas"])
+
+                if r["total_alertas"] == 0:
+                    st.success("✅ Sin alertas de consistencia. Base de datos coherente.")
+                else:
+                    st.warning(f"⚠️ {r['total_alertas']} alerta(s) detectada(s). Revisar detalles.")
+
+                st.markdown("---")
+
+                # ── Check 1: OC sin REQ ───────────────────────────────────────
+                with st.expander(
+                    f"📋 OC sin Requisición — {r['oc_sin_req']} OC",
+                    expanded=r["oc_sin_req"] > 0,
+                ):
+                    if not diag["oc_sin_req"].empty:
+                        st.warning("Estas OC no tienen requisición asociada en el sistema:")
+                        st.dataframe(
+                            diag["oc_sin_req"],
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Monto Total ($)": st.column_config.NumberColumn(
+                                    format="$%.0f"
+                                )
+                            },
+                        )
+                    elif not diag["tiene_compras"]:
+                        st.info("ℹ️ Cubo de Compras no cargado — check no disponible.")
+                    else:
+                        st.success("✅ Todas las OC tienen requisición asociada.")
+
+                # ── Check 2: REQ sin OC esperada ─────────────────────────────
+                with st.expander(
+                    f"⏳ REQ sin OC esperada — {r['req_sin_oc']} REQ",
+                    expanded=r["req_sin_oc"] > 0,
+                ):
+                    if not diag["req_sin_oc"].empty:
+                        st.warning(
+                            f"Requisiciones sin OC, guía ni observación "
+                            f"con más de {check_consistencia.DIAS_UMBRAL_SIN_OC} días:"
+                        )
+                        st.dataframe(
+                            diag["req_sin_oc"],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    else:
+                        st.success("✅ No hay requisiciones antiguas sin gestión.")
+
+                # ── Check 3: Montos descuadrados ──────────────────────────────
+                with st.expander(
+                    f"💰 Montos descuadrados — {r['montos_descuadrados']} líneas",
+                    expanded=False,
+                ):
+                    if not diag["montos_descuadrados"].empty:
+                        st.warning(
+                            "Líneas donde total_linea ≠ precio × cantidad (diferencia > $1):"
+                        )
+                        st.dataframe(
+                            diag["montos_descuadrados"],
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Precio Unit.": st.column_config.NumberColumn(
+                                    format="$%.2f"
+                                ),
+                                "Total Línea (BD)": st.column_config.NumberColumn(
+                                    format="$%.2f"
+                                ),
+                                "Total Calculado": st.column_config.NumberColumn(
+                                    format="$%.2f"
+                                ),
+                                "Diferencia $": st.column_config.NumberColumn(
+                                    format="$%.2f"
+                                ),
+                            },
+                        )
+                    elif not diag["tiene_compras"]:
+                        st.info("ℹ️ Cubo de Compras no cargado — check no disponible.")
+                    else:
+                        st.success("✅ Sin montos descuadrados.")
+
+                # ── Check 4: Recepciones excedidas ────────────────────────────
+                with st.expander(
+                    f"📦 Recepciones excedidas — {r['recepciones_excedidas']} líneas",
+                    expanded=False,
+                ):
+                    if not diag["recepciones_excedidas"].empty:
+                        st.warning(
+                            "Líneas donde cantidad recibida + manual > solicitada:"
+                        )
+                        st.dataframe(
+                            diag["recepciones_excedidas"],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    elif not diag["tiene_compras"]:
+                        st.info("ℹ️ Cubo de Compras no cargado — check no disponible.")
+                    else:
+                        st.success("✅ Sin recepciones excedidas.")
+
 
 # ============================================================================
 # ENRUTAMIENTO DE PÁGINAS
@@ -2202,6 +2332,13 @@ def pagina_configuracion():
 
 def main():
     """Función principal que maneja el enrutamiento de páginas."""
+
+    # Mostrar errores de arranque capturados antes de set_page_config
+    for _nivel, _msg in _startup_errors:
+        if _nivel == "error":
+            st.error(_msg)
+        else:
+            st.warning(_msg)
 
     # Crear sidebar
     crear_sidebar()

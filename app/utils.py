@@ -5,10 +5,93 @@ KS Seguridad Industrial - Sistema de Requisiciones
 
 import hashlib
 import pandas as pd
+import streamlit as st
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from app import config
 from app import cache as _cache
+
+
+# ============================================================================
+# GESTIÓN DE SESSION STATE
+# ============================================================================
+
+# Fuente única de verdad: todos los defaults de UI.
+# Las claves cubo_* se manejan aparte en inicializar_session_state().
+STATE_KEYS: Dict[str, Any] = {
+    # Navegación
+    "pagina_actual": "📊 Dashboard",
+    "datos_cargados": False,
+    # Gestión Requisiciones — filtros
+    "filtro_req_estado": [],
+    "filtro_req_fecha_desde": None,
+    "filtro_req_fecha_hasta": None,
+    "filtro_req_solo_pendientes": False,
+    "filtro_req_numreq": "",
+    "filtro_req_codprod": "",
+    "filtro_req_desprod": "",
+    "filtro_req_proveedor": [],
+    # Gestión Requisiciones — estado UI
+    "oc_enviada_override": None,
+    "estado_envio_override": None,
+    "reload_req_data": False,
+    "_last_grid_key_req": None,
+    # Seguimiento OC — filtros
+    "filtro_oc_seleccionada": "Todas",
+    "filtro_estado_seleccionado": "Todos",
+    "filtro_buscar_producto": "",
+    "filtro_observacion": "",
+    "filtro_oc_desprod": "",
+    "filtro_oc_proveedor": [],
+}
+
+# Mapeo shadow-key → widget-key por módulo.
+# Necesario para que reset_filters() limpie también el estado interno del widget
+# (si solo se resetea el shadow-key el widget Streamlit sigue mostrando el valor previo).
+_WIDGET_KEYS_REQ: Dict[str, str] = {
+    "filtro_req_estado": "multi_estado_req",
+    "filtro_req_fecha_desde": "date_desde_req",
+    "filtro_req_fecha_hasta": "date_hasta_req",
+    "filtro_req_solo_pendientes": "chk_pendientes_req",
+    "filtro_req_numreq": "txt_numreq",
+    "filtro_req_codprod": "txt_codprod_req",
+    "filtro_req_desprod": "txt_desprod_req",
+    "filtro_req_proveedor": "multi_proveedor_req",
+}
+
+_WIDGET_KEYS_OC: Dict[str, str] = {
+    "filtro_oc_seleccionada": "select_oc",
+    "filtro_estado_seleccionado": "select_estado",
+    "filtro_buscar_producto": "txt_buscar_producto",
+    "filtro_observacion": "txt_observacion",
+    "filtro_oc_desprod": "txt_desprod_oc",
+    "filtro_oc_proveedor": "multi_proveedor_oc",
+}
+
+
+def get_state(key: str) -> Any:
+    """Lee session_state[key]; si no existe devuelve el default de STATE_KEYS."""
+    return st.session_state.get(key, STATE_KEYS.get(key))
+
+
+def set_state(key: str, val: Any) -> None:
+    """Escribe session_state[key] = val."""
+    st.session_state[key] = val
+
+
+def reset_filters(grupo: str) -> None:
+    """
+    Resetea filtros de un grupo a sus defaults.
+    Limpia tanto el shadow-key como la clave interna del widget para que
+    el widget se refresque visualmente en el próximo render.
+
+    grupo: "req" | "oc"
+    """
+    mapping = _WIDGET_KEYS_REQ if grupo == "req" else _WIDGET_KEYS_OC
+    for shadow_key, widget_key in mapping.items():
+        st.session_state[shadow_key] = STATE_KEYS[shadow_key]
+        if widget_key in st.session_state:
+            del st.session_state[widget_key]
 
 
 # ============================================================================
@@ -96,6 +179,93 @@ def validar_cubo_inventario(df: pd.DataFrame) -> Tuple[bool, str, List[str]]:
         config.COLUMNAS_CRITICAS_INVENTARIO,
         "Cubo de Inventario",
     )
+
+
+def validar_filas_requisiciones(df: pd.DataFrame) -> Tuple[bool, List[dict]]:
+    """
+    Valida fila a fila el cubo de requisiciones antes de insertar en la BD.
+
+    Verifica:
+    - Columnas obligatorias presentes (NumReq, CodProd)
+    - NumReq y CodProd no vacíos en filas con cantidad > 0
+    - TALCA es número entero positivo
+    - No hay duplicados (NumReq, CodProd) dentro del mismo archivo
+
+    Returns:
+        (es_valido, errores) donde errores es lista de dicts con
+        {Fila, Campo, Valor, Descripción}
+    """
+    errores: List[dict] = []
+
+    # Columnas mínimas obligatorias
+    for col in ("NumReq", "CodProd"):
+        if col not in df.columns:
+            errores.append({
+                "Fila": "—",
+                "Campo": col,
+                "Valor": "",
+                "Descripción": f"Columna obligatoria '{col}' no existe en el archivo",
+            })
+
+    if errores:
+        return False, errores
+
+    tiene_talca = "TALCA" in df.columns
+    cantidad_series = (
+        pd.to_numeric(df["TALCA"], errors="coerce").fillna(0)
+        if tiene_talca
+        else pd.Series(0, index=df.index)
+    )
+    df_activas = df[cantidad_series > 0]
+
+    # Duplicados (NumReq, CodProd) dentro del archivo
+    if len(df_activas) > 0:
+        dup_mask = df_activas.duplicated(subset=["NumReq", "CodProd"], keep=False)
+        for idx in df_activas[dup_mask].index:
+            row = df_activas.loc[idx]
+            errores.append({
+                "Fila": idx + 2,
+                "Campo": "NumReq + CodProd",
+                "Valor": f"{row.get('NumReq', '')} / {row.get('CodProd', '')}",
+                "Descripción": "Combinación NumReq+CodProd duplicada en el archivo",
+            })
+
+    # Validación fila a fila
+    for idx, row in df.iterrows():
+        fila_excel = idx + 2  # +2: fila 1 = encabezado en Excel
+
+        cantidad_raw = row.get("TALCA", 0) if tiene_talca else 0
+        cantidad = pd.to_numeric(cantidad_raw, errors="coerce")
+        if pd.isna(cantidad) or cantidad <= 0:
+            continue  # Fila sin cantidad para TALCA — se omite, no es error
+
+        numreq = str(row.get("NumReq", "")).strip()
+        if not numreq or numreq == "nan":
+            errores.append({
+                "Fila": fila_excel,
+                "Campo": "NumReq",
+                "Valor": str(row.get("NumReq", "")),
+                "Descripción": "NumReq vacío o nulo",
+            })
+
+        codprod = str(row.get("CodProd", "")).strip()
+        if not codprod or codprod == "nan":
+            errores.append({
+                "Fila": fila_excel,
+                "Campo": "CodProd",
+                "Valor": str(row.get("CodProd", "")),
+                "Descripción": "CodProd vacío o nulo",
+            })
+
+        if not pd.isna(cantidad) and cantidad != int(cantidad):
+            errores.append({
+                "Fila": fila_excel,
+                "Campo": "TALCA",
+                "Valor": str(cantidad_raw),
+                "Descripción": "Cantidad debe ser número entero (sin decimales)",
+            })
+
+    return len(errores) == 0, errores
 
 
 def _leer_excel_hoja(archivo, hoja: str, tipo_cubo: str) -> pd.DataFrame:

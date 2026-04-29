@@ -541,6 +541,38 @@ def migrar_base_datos_existente():
                     conn.commit()
                     print("✅ Constraint UNIQUE(numreq, codprod) agregado exitosamente")
 
+            # Normalizar estado_oc con valores del ERP que no pertenecen a config.ESTADOS_OC
+            cursor.execute("""
+                UPDATE requisiciones
+                SET estado_oc = CASE estado_oc
+                    WHEN 'Recibido'       THEN 'Recepción Completa'
+                    WHEN 'Recibida'       THEN 'Recepción Completa'
+                    WHEN 'Sin Recepción'  THEN 'OC Generada'
+                    WHEN 'Sin Recepcion'  THEN 'OC Generada'
+                    WHEN 'Parcial'        THEN 'Recepción Parcial'
+                    ELSE estado_oc
+                END
+                WHERE estado_oc IN (
+                    'Recibido', 'Recibida',
+                    'Sin Recepción', 'Sin Recepcion',
+                    'Parcial'
+                )
+            """)
+            if cursor.rowcount > 0:
+                print(f"Normalizados {cursor.rowcount} estado_oc con valores del ERP")
+            conn.commit()
+
+            # Agregar columna desprod a tabla compras si existe y no la tiene
+            cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='compras'"
+            )
+            if cursor.fetchone():
+                cursor.execute("PRAGMA table_info(compras)")
+                if "desprod" not in [col[1] for col in cursor.fetchall()]:
+                    cursor.execute("ALTER TABLE compras ADD COLUMN desprod TEXT")
+                    conn.commit()
+                    print("✅ Campo desprod agregado a tabla compras")
+
             print("✅ Migración completada exitosamente")
 
     except Exception as e:
@@ -636,12 +668,13 @@ def cargar_requisiciones_desde_cubo(
     """
     Carga requisiciones desde el cubo Excel a la base de datos de forma IDEMPOTENTE.
 
-    Características:
-    - NUNCA borra registros existentes
-    - NUNCA duplica requisiciones (usa numreq como clave única)
-    - Solo inserta requisiciones nuevas que no existen en la BD
-    - Mapea FEmision -> fecha_requisicion
-    - Registra estadísticas de la carga en tabla cargas_diarias
+    Proceso en dos fases:
+    1. Validación: itera todas las filas y acumula errores SIN tocar la BD.
+       Si se detecta cualquier error, retorna (0, N, mensajes) inmediatamente
+       y la BD queda intacta.
+    2. Inserción atómica: dentro de un único bloque with-conn ejecuta todos
+       los INSERTs. Si falla cualquier sentencia, el context manager aplica
+       rollback automático sobre toda la operación.
 
     Args:
         df_cubo (pd.DataFrame): DataFrame con el cubo de requisiciones
@@ -652,140 +685,123 @@ def cargar_requisiciones_desde_cubo(
             - Cantidad de errores
             - Lista de mensajes de error
     """
-    insertadas = 0
-    errores = 0
-    omitidas = 0
-    mensajes_error = []
+    mensajes_error: List[str] = []
     registros_leidos = len(df_cubo)
-
     inicio_carga = datetime.now()
+
+    # ── FASE 1: Validar y preparar filas (sin tocar la BD) ─────────────────
+    filas_validas = []
+
+    for index, row in df_cubo.iterrows():
+        cantidad = row.get("TALCA", 0)
+
+        if pd.isna(cantidad) or cantidad == 0:
+            continue  # Fila sin cantidad para TALCA — omitir, no es error
+
+        try:
+            cantidad = int(cantidad)
+        except (ValueError, TypeError):
+            mensajes_error.append(
+                f"Fila {index + 1}: TALCA no es un número válido ({row.get('TALCA')})"
+            )
+            continue
+
+        numreq = str(row.get("NumReq", "")).strip()
+        if not numreq or numreq == "nan":
+            mensajes_error.append(f"Fila {index + 1}: Falta NumReq")
+            continue
+
+        codprod = str(row.get("CodProd", "")).strip()
+        if not codprod or codprod == "nan":
+            mensajes_error.append(
+                f"Fila {index + 1}: Falta CodProd (NumReq: {numreq})"
+            )
+            continue
+
+        # Parsear fecha — errores aquí no bloquean la carga
+        fecha_requisicion = None
+        femision = row.get("FEmision")
+        if pd.notna(femision):
+            try:
+                if isinstance(femision, str):
+                    fecha_requisicion = pd.to_datetime(
+                        femision, errors="coerce"
+                    ).strftime("%Y-%m-%d")
+                elif isinstance(femision, (pd.Timestamp, datetime)):
+                    fecha_requisicion = femision.strftime("%Y-%m-%d")
+                else:
+                    resultado = pd.to_datetime(
+                        femision, origin="1899-12-30", unit="D", errors="coerce"
+                    )
+                    if pd.notna(resultado):
+                        fecha_requisicion = resultado.strftime("%Y-%m-%d")
+            except Exception:
+                pass
+
+        filas_validas.append({
+            "numreq": numreq,
+            "codprod": codprod,
+            "desprod": str(row.get("DesProd", "")),
+            "cantidad": cantidad,
+            "fecha_requisicion": fecha_requisicion,
+            "sucursal_destino": config.DEFAULT_SUCURSAL,
+            "proveedor": "",
+            "oc": "",
+            "n_guia": "",
+            "fecha_oc": None,
+            "observacion": "",
+            "detalle": f"Cargado desde cubo - Stock Talca: {row.get('KS TALCA', 0)}",
+            "cant_recibida": 0,
+            "estado_oc": config.DEFAULT_ESTADO,
+        })
+
+    # Si hay errores de validación → rechazar todo, BD intacta
+    if mensajes_error:
+        return 0, len(mensajes_error), mensajes_error
+
+    if not filas_validas:
+        return 0, 0, []
+
+    # ── FASE 2: Insertar dentro de una sola transacción ────────────────────
+    insertadas = 0
+    omitidas = 0
 
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            # Iterar sobre cada fila del cubo
-            for index, row in df_cubo.iterrows():
-                try:
-                    # Obtener cantidad solicitada para TALCA
-                    cantidad = row.get("TALCA", 0)
-
-                    # Si no hay cantidad solicitada, saltar esta fila
-                    if pd.isna(cantidad) or cantidad == 0:
-                        continue
-
-                    # Convertir cantidad a entero
-                    cantidad = int(cantidad)
-
-                    # Obtener NumReq y CodProd - clave de negocio compuesta
-                    numreq = str(row.get("NumReq", "")).strip()
-
-                    # Validar campos críticos
-                    if not numreq:
-                        errores += 1
-                        mensajes_error.append(f"Fila {index + 1}: Falta NumReq")
-                        continue
-
-                    codprod = str(row.get("CodProd", "")).strip()
-                    if not codprod:
-                        errores += 1
-                        mensajes_error.append(
-                            f"Fila {index + 1}: Falta CodProd (NumReq: {numreq})"
-                        )
-                        continue
-
-                    # Verificar si ya existe - REGLA DE IDEMPOTENCIA
-                    # INSERT OR IGNORE aplica UNIQUE(numreq, codprod); el
-                    # rowcount posterior determina si hubo inserción real.
-                    # No es necesario pre-consultar claves existentes.
-                    fecha_requisicion = None
-                    femision = row.get("FEmision")
-
-                    if pd.notna(femision):
-                        try:
-                            # Intentar convertir a fecha estándar
-                            if isinstance(femision, str):
-                                fecha_requisicion = pd.to_datetime(
-                                    femision, errors="coerce"
-                                ).strftime("%Y-%m-%d")
-                            elif isinstance(femision, (pd.Timestamp, datetime)):
-                                fecha_requisicion = femision.strftime("%Y-%m-%d")
-                            else:
-                                # Puede ser un número de serie de Excel
-                                fecha_requisicion = pd.to_datetime(
-                                    femision,
-                                    origin="1899-12-30",
-                                    unit="D",
-                                    errors="coerce",
-                                )
-                                if pd.notna(fecha_requisicion):
-                                    fecha_requisicion = fecha_requisicion.strftime(
-                                        "%Y-%m-%d"
-                                    )
-                        except:
-                            pass  # Si falla la conversión, fecha_requisicion queda como None
-
-                    # Preparar datos de la requisición
-                    datos_requisicion = {
-                        "numreq": numreq,
-                        "codprod": codprod,
-                        "desprod": str(row.get("DesProd", "")),
-                        "cantidad": cantidad,
-                        "fecha_requisicion": fecha_requisicion,
-                        "sucursal_destino": config.DEFAULT_SUCURSAL,
-                        "proveedor": "",
-                        "oc": "",
-                        "n_guia": "",
-                        "fecha_oc": None,
-                        "observacion": "",
-                        "detalle": f"Cargado desde cubo - Stock Talca: {row.get('KS TALCA', 0)}",
-                        "cant_recibida": 0,
-                        "estado_oc": config.DEFAULT_ESTADO,
-                    }
-
-                    # Insertar SOLO si no existe (INSERT OR IGNORE garantiza idempotencia)
-                    cursor.execute(
-                        """
-                        INSERT OR IGNORE INTO requisiciones (
-                            numreq, codprod, desprod, cantidad, fecha_requisicion,
-                            sucursal_destino, proveedor, oc, n_guia, fecha_oc, 
-                            observacion, detalle, cant_recibida, estado_oc
-                        ) VALUES (
-                            :numreq, :codprod, :desprod, :cantidad, :fecha_requisicion,
-                            :sucursal_destino, :proveedor, :oc, :n_guia, :fecha_oc,
-                            :observacion, :detalle, :cant_recibida, :estado_oc
-                        )
-                    """,
-                        datos_requisicion,
+            for datos in filas_validas:
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO requisiciones (
+                        numreq, codprod, desprod, cantidad, fecha_requisicion,
+                        sucursal_destino, proveedor, oc, n_guia, fecha_oc,
+                        observacion, detalle, cant_recibida, estado_oc
+                    ) VALUES (
+                        :numreq, :codprod, :desprod, :cantidad, :fecha_requisicion,
+                        :sucursal_destino, :proveedor, :oc, :n_guia, :fecha_oc,
+                        :observacion, :detalle, :cant_recibida, :estado_oc
                     )
+                """,
+                    datos,
+                )
+                if cursor.rowcount > 0:
+                    insertadas += 1
+                else:
+                    omitidas += 1
 
-                    # Verificar si realmente se insertó
-                    if cursor.rowcount > 0:
-                        insertadas += 1
-                    else:
-                        omitidas += 1
-
-                except Exception as e:
-                    errores += 1
-                    mensajes_error.append(f"Fila {index + 1}: {str(e)}")
-                    continue
-
-            # Registrar estadísticas de la carga en tabla de auditoría
             detalles = {
                 "registros_leidos": registros_leidos,
                 "insertadas": insertadas,
                 "omitidas": omitidas,
-                "errores": errores,
+                "errores": 0,
                 "duracion_segundos": (datetime.now() - inicio_carga).total_seconds(),
-                "mensajes_error": mensajes_error[:10]
-                if mensajes_error
-                else [],  # Solo primeros 10 errores
+                "mensajes_error": [],
             }
-
             cursor.execute(
                 """
                 INSERT INTO cargas_diarias (
-                    fecha_carga, registros_leidos, registros_insertados, 
+                    fecha_carga, registros_leidos, registros_insertados,
                     registros_omitidos, errores, detalles
                 ) VALUES (?, ?, ?, ?, ?, ?)
             """,
@@ -794,19 +810,17 @@ def cargar_requisiciones_desde_cubo(
                     registros_leidos,
                     insertadas,
                     omitidas,
-                    errores,
+                    0,
                     json.dumps(detalles, ensure_ascii=False),
                 ),
             )
 
-            conn.commit()
-
     except Exception as e:
-        mensajes_error.append(f"Error general: {str(e)}")
-        return 0, 0, mensajes_error
+        # El context manager ya ejecutó rollback automático
+        return 0, 1, [f"Error en la BD (rollback aplicado): {str(e)}"]
 
     invalidar_cache()
-    return insertadas, errores, mensajes_error
+    return insertadas, 0, []
 
 
 # ============================================================================
@@ -1125,6 +1139,7 @@ def obtener_estadisticas_generales() -> Dict:
         "oc_transito": 0,
         "productos_pendientes": 0,
         "valor_total_oc": 0,
+        "total_req": 0,
     }
     try:
         df = get_table("requisiciones")
@@ -1140,6 +1155,7 @@ def obtener_estadisticas_generales() -> Dict:
                 df.loc[df["saldo_pendiente"] > 0, "codprod"].nunique()
             ),
             "valor_total_oc": 0,
+            "total_req": int(len(df)),
         }
     except Exception:
         return _defaults
@@ -1386,14 +1402,13 @@ def actualizar_requisicion_desde_ui(
                 elif valor not in config.ESTADOS_REQ:
                     valor = "Pendiente"
 
-            # Validar fecha_oc si se proporciona
+            # Validar y normalizar fecha_oc a YYYY-MM-DD
             if campo == "fecha_oc" and valor:
                 if isinstance(valor, str):
                     try:
-                        # Intentar parsear la fecha
-                        pd.to_datetime(valor)
+                        valor = pd.to_datetime(valor, dayfirst=True).strftime("%Y-%m-%d")
                     except:
-                        continue  # Ignorar fecha inválida
+                        continue
 
             datos_seguros[campo] = valor
         else:
@@ -2168,6 +2183,15 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
     FACTOR_MIN = 0.8
     FACTOR_MAX = 10.0
 
+    # Mapa de normalización: estados del ERP → estados internos de config.ESTADOS_OC
+    _MAPA_ESTADO_ERP = {
+        "Recibido":      "Recepción Completa",
+        "Recibida":      "Recepción Completa",
+        "Sin Recepción": "OC Generada",
+        "Sin Recepcion": "OC Generada",
+        "Parcial":       "Recepción Parcial",
+    }
+
     try:
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -2277,6 +2301,9 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
                 if req_id is None:
                     continue
 
+                # Normalizar estado del ERP antes de guardar
+                estado_oc_norm = _MAPA_ESTADO_ERP.get(estado_linea, estado_linea) if estado_linea else "Pendiente"
+
                 # Asignar la OC directamente a esa requisición
                 cursor.execute(
                     """
@@ -2288,7 +2315,7 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
                     WHERE id = ?
                       AND codprod  = ?
                 """,
-                    (proveedor, num_oc, fecha_oc, estado_linea, req_id, codprod),
+                    (proveedor, num_oc, fecha_oc, estado_oc_norm, req_id, codprod),
                 )
 
                 if cursor.rowcount > 0:
@@ -2340,7 +2367,14 @@ def actualizar_requisiciones_desde_compras() -> Tuple[bool, str, int]:
                         LIMIT 1
                     ),
                     estado_oc = (
-                        SELECT c.estado_linea
+                        SELECT CASE c.estado_linea
+                            WHEN 'Recibido'       THEN 'Recepción Completa'
+                            WHEN 'Recibida'       THEN 'Recepción Completa'
+                            WHEN 'Sin Recepción'  THEN 'OC Generada'
+                            WHEN 'Sin Recepcion'  THEN 'OC Generada'
+                            WHEN 'Parcial'        THEN 'Recepción Parcial'
+                            ELSE COALESCE(c.estado_linea, 'Pendiente')
+                        END
                         FROM compras c
                         WHERE c.codprod = requisiciones.codprod
                           AND c.fecha_oc IS NOT NULL

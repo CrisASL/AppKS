@@ -49,6 +49,7 @@ AppKS/
 │   │       └── view.py         # Vista Streamlit del módulo
 │   │
 │   └── services/
+│       ├── check_consistencia.py   # Diagnóstico de consistencia REQ↔OC
 │       ├── compras_service.py
 │       └── ventas_inventario_service.py
 │
@@ -144,20 +145,25 @@ build.bat
 
 ## Estado actual
 
-**v1.8.1** – Sistema completo de gestión operativa
+**v1.8.4** – Sistema completo de gestión operativa
 
 - Arquitectura modular por servicios (UI / Services / DAL)
 - Carga idempotente con clave compuesta para requisiciones y compras
 - UPSERT inteligente con detección de cambios
 - Control de versión por hash MD5 en cubos de ventas e inventario
-- Sincronización automática REQ → OC: pure SQL con `UPDATE ... WHERE EXISTS`, `julianday()` para aritmética de fechas, ventana 0–90 días
-- Sincronización gestion → compras: `UPDATE gestion SET ... FROM compras` en un único JOIN pass
+- Sincronización automática REQ → OC: pure SQL, 3 pasos (proveedor de respaldo / match por observación / match automático), normalización de estados ERP mediante `_MAPA_ESTADO_ERP`
 - Módulo Análisis Stock: clasificación por estado de stock y rotación de productos
 - Edición segura inline en 4 capas (UI → validación → backend → triggers SQL)
 - Estados de columna como TEXT con whitelist — elimina conflictos de tipo entre AG Grid, pandas y SQLite
-- Migraciones de esquema automáticas e idempotentes
+- `fecha_oc` normalizada a `YYYY-MM-DD` en toda escritura desde UI
+- Migraciones de esquema automáticas e idempotentes (cubre `requisiciones` y `compras`)
 - Persistencia robusta de datos entre navegaciones con rehidratación automática
+- Backup WAL-safe con checkpoint previo a la copia
 - Launcher `.exe` minimalista (~8 MB)
+- Validación de Excel two-pass en carga de requisiciones: rechazo total ante errores de columnas, tipos o duplicados `(NumReq, CodProd)` — ningún registro se inserta si el archivo tiene errores
+- Carga atómica de requisiciones: FASE 1 valida todo, FASE 2 inserta en una sola transacción con rollback automático
+- Servicio `check_consistencia.py` con 4 checks de integridad REQ↔OC
+- Tab "🔍 Diagnóstico" en ⚙️ Configuración (solo lectura)
 
 ---
 

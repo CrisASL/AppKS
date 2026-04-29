@@ -668,26 +668,153 @@ st.session_state.pop(session_key, None)
 
 ---
 
+## 🔹 v1.8.2 – Correcciones de Estabilidad (Bugs Alta Prioridad)
+
+### 🎯 Objetivo
+Corregir cuatro bugs de alta prioridad identificados en auditoría de código.
+
+### 🐛 Bugs Corregidos
+
+#### BUG-01 · `set_page_config` como primera llamada Streamlit (`main.py`)
+- Los bloques `try/except` de inicialización llamaban `st.error()`/`st.warning()` **antes** de `st.set_page_config()`, lo que viola la restricción de Streamlit.
+- Solución: `st.set_page_config()` movido al primer lugar; errores de arranque se acumulan en `_startup_errors[]` y se muestran dentro de `main()`.
+
+#### BUG-02 · Normalización de estados OC del ERP (`database.py`)
+- `actualizar_requisiciones_desde_compras()` copiaba `estado_linea` del ERP directamente a `estado_oc` sin mapear. Los valores del ERP (`'Recibido'`, `'Sin Recepción'`, `'Parcial'`) no existen en `config.ESTADOS_OC`, rompiendo el gráfico de torta y los filtros.
+- Solución: diccionario `_MAPA_ESTADO_ERP` aplicado en Step 2 (Python) y CASE statement en Step 3 (SQL). Migración idempotente en `migrar_base_datos_existente()` que normaliza datos existentes.
+- Mapa: `'Recibido'` → `'Recepción Completa'` · `'Sin Recepción'` → `'OC Generada'` · `'Parcial'` → `'Recepción Parcial'`
+
+#### BUG-03 · Backup completo en modo WAL (`main.py`)
+- `shutil.copy2()` solo copiaba el `.db` sin hacer checkpoint de los archivos WAL.
+- Solución: `PRAGMA wal_checkpoint(FULL)` ejecutado antes de la copia.
+
+#### BUG-04 · AGGrid key dinámico en Gestión Requisiciones (`main.py`)
+- Key fijo `"aggrid_requisiciones"` mantenía estado interno de la grilla al cambiar filtros, mezclando ediciones pendientes entre búsquedas distintas.
+- Solución: key computado como `f"aggrid_req_{hash(filtros + desprod + proveedor + len(df)) % 1M}"`.
+
+### 📈 Resultado
+✅ App no crashea con `StreamlitAPIException` en inicialización  
+✅ Gráfico de torta y filtros por estado operativos con datos reales  
+✅ Backups garantizados completos en modo WAL  
+✅ AGGrid no mezcla ediciones entre filtros distintos  
+
+---
+
+## 🔹 v1.8.3 – Correcciones de Estabilidad (Bugs Media y Baja Prioridad)
+
+### 🎯 Objetivo
+Cerrar los 9 bugs abiertos identificados en la auditoría de código de semana 1 (prioridad media y baja).
+
+### 🐛 Bugs Corregidos
+
+#### BUG-05 · Migración DDL en cada render de Seguimiento OC (`main.py` + `database.py`)
+- `compras_service.migrar_tabla_compras_agregar_desprod()` se ejecutaba en cada navegación a "Seguimiento OC".
+- Solución: migración movida a `migrar_base_datos_existente()`, ejecutada una sola vez al arrancar.
+
+#### BUG-06 · Label "Productos Únicos" incorrecto (`main.py`)
+- El metric mostraba `stats["productos_pendientes"]` (solo productos con saldo > 0) con label "Productos Únicos".
+- Solución: label corregido a "Productos con Saldo Pendiente" en tab2 y tab4 de Configuración.
+
+#### BUG-07 · "Total Requisiciones" mostraba suma parcial (`main.py` + `database.py`)
+- El metric sumaba `req_pendientes + oc_transito`, excluyendo completadas, canceladas, etc.
+- Solución: `total_req` agregado a `obtener_estadisticas_generales()`; metric usa el conteo real.
+
+#### BUG-08 · Botón "Limpiar Filtros" sin key único (`main.py`)
+- El botón en Seguimiento OC no tenía `key=`, potencial `DuplicateWidgetID` en navegación entre pestañas.
+- Solución: `key="btn_limpiar_oc"` agregado.
+
+#### BUG-09 · `fecha_oc` editable no normalizada (`database.py`)
+- `actualizar_requisicion_desde_ui()` validaba la fecha sin normalizar el formato, pudiendo guardar distintos formatos según el locale del navegador.
+- Solución: normalización explícita a `YYYY-MM-DD` con `pd.to_datetime(valor, dayfirst=True).strftime(...)`.
+
+#### BUG-10 · `getattr(session_state)` sin default (`main.py`)
+- `getattr(st.session_state, session_key)` sin valor default podía lanzar `AttributeError` con session_key no inicializada.
+- Solución: `getattr(st.session_state, session_key, None)`.
+
+#### BUG-11 · Colores indefinidos para estados ERP en gráfico de torta (`config.py`)
+- `COLORES_ESTADO` no tenía entradas para los alias del ERP (`'Recibido'`, `'Sin Recepción'`, `'Parcial'`).
+- Solución: aliases ERP agregados como respaldo — los estados se normalizan en sync pero quedan cubiertos para datos edge-case.
+
+#### BUG-12 · Título "Último Mes" impreciso (`main.py`)
+- El gráfico de top productos usaba exactamente 30 días pero el título decía "Último Mes".
+- Solución: título corregido a "Últimos 30 Días".
+
+#### BUG-13 · `setattr(st.session_state, ...)` no recomendado (`main.py`)
+- Tres llamadas `setattr(st.session_state, key, df)` reemplazadas por el acceso estándar `st.session_state[key] = df`.
+
+### 📈 Resultado
+✅ 13/13 bugs de auditoría semana 1 cerrados  
+✅ `migrar_base_datos_existente()` cubre tabla `compras` además de `requisiciones`  
+✅ Métricas de Configuración con valores correctos  
+✅ `fecha_oc` normalizada a `YYYY-MM-DD` en toda escritura desde UI  
+✅ `session_state` accedido por convención estándar en `_widget_cubo_uploader()`
+
+---
+
+## 🔹 v1.8.4 – Validación Excel + Diagnóstico de Consistencia
+
+### 🎯 Objetivo
+Proteger la carga de requisiciones contra archivos mal formados y proveer visibilidad sobre inconsistencias entre tablas REQ y OC.
+
+### 🏗️ Implementado
+
+#### Validador de filas (`app/utils.py`)
+- `validar_filas_requisiciones()`: valida columnas obligatorias, tipos de datos y duplicados `(NumReq, CodProd)` en el archivo antes de cualquier escritura en BD
+- Rechaza la carga completa ante el primer error — tabla de errores mostrada con `st.error`
+- Integrado como `pre_save_validator` en el widget de carga; el hash del archivo **no** se actualiza si la validación falla
+
+#### Carga atómica (`app/database.py`)
+- `cargar_requisiciones_desde_cubo()` reescrita con patrón two-pass:
+  - **FASE 1**: valida todas las filas — rechaza completamente si hay errores, sin tocar la BD
+  - **FASE 2**: inserta en una sola transacción vía `get_db_connection()` — rollback automático ante cualquier error de BD
+
+#### Servicio de diagnóstico (`app/services/check_consistencia.py`)
+- 4 checks: OC sin REQ · REQ sin OC (+14 días) · Montos descuadrados · Recepciones excedidas
+- `ejecutar_diagnostico()` retorna DataFrames + resumen con conteos por severidad
+
+#### Tab Diagnóstico (`app/main.py`)
+- Tab "🔍 Diagnóstico" en ⚙️ Configuración (solo lectura)
+- Resumen de alertas con severidad 🔴/🟡 y tablas expandibles por check
+
+### 📈 Resultado
+✅ Carga de requisiciones con validación en dos pasos — BD nunca queda en estado parcial  
+✅ Panel de diagnóstico de consistencia REQ↔OC operativo desde Configuración  
+✅ Semana 1 cerrada: 13/13 bugs de auditoría resueltos (v1.8.2 + v1.8.3)
+
+---
+
 # 📍 Estado Actual del Proyecto
 
 El proyecto se encuentra actualmente en la versión:
 
-## 🔹 **v1.8.1**
+## 🔹 **v1.8.4**
 
 Sistema completo de gestión de requisiciones, compras y análisis de stock con:
+- **Validación two-pass de Excel**: rechazo total ante errores — ningún registro se inserta si el archivo tiene errores de columnas, tipos o duplicados `(NumReq, CodProd)`
+- **Carga atómica de requisiciones**: FASE 1 valida todo, FASE 2 inserta en transacción única con rollback automático
+- **Panel de diagnóstico REQ↔OC**: 4 checks de consistencia (OC sin REQ, REQ sin OC, montos descuadrados, recepciones excedidas)
+- **Tab 🔍 Diagnóstico** en ⚙️ Configuración
+- **0 bugs abiertos** — auditoría semana 1 completada (13/13 cerrados)
 - **Estado de envío textual** (`estado_envio TEXT`) con dropdown, validación por whitelist y cell styles JS
 - **Persistencia robusta de datos** con rehidratación automática desde SQLite
+- **Normalización de estados OC del ERP** con `_MAPA_ESTADO_ERP` y CASE SQL — estados coherentes con `config.ESTADOS_OC`
+- **Backup WAL-safe** con `PRAGMA wal_checkpoint(FULL)` antes de copia
+- **AGGrid key dinámico** por filtros activos — sin mezcla de ediciones entre búsquedas
+- **Inicialización estable**: `set_page_config` es siempre la primera llamada Streamlit
+- **`fecha_oc` normalizada** a `YYYY-MM-DD` al guardar desde UI (`dayfirst=True`)
+- **Métricas correctas**: "Total Requisiciones" usa conteo real; "Productos con Saldo Pendiente" reemplaza el label incorrecto
+- **Migraciones completas**: `migrar_base_datos_existente()` cubre `requisiciones` y `compras`
 - Acciones masivas de marcado de envío preservadas en session state
 - Seguimiento avanzado de órdenes de compra con filtros de texto
 - Sincronización automática REQ→OC: pure SQL (`UPDATE...WHERE EXISTS`, `julianday()`), ventana 0–90 días, sin loops Python
-- Sincronización gestion→compras: `UPDATE...FROM` en un único JOIN pass
 - Módulo de Análisis Stock: estado de stock y rotación de productos
 - Persistencia de los 4 cubos con control por hash MD5
 - Invalidación completa de caché al eliminar cubos (tablas raw + hashes + session state)
-- Persistencia de filtros para mejor experiencia de usuario
 - Control granular de eliminación de datos
 - **Launcher `.exe` minimalista** (`start_app.py` + PyInstaller `--onefile`)
 - Sistema de migraciones automáticas de base de datos
+- **Validación two-pass de Excel** con rechazo total y transacción atómica en carga de requisiciones
+- **Panel de diagnóstico** REQ↔OC con 4 checks de consistencia (tab 🔍 Diagnóstico en Configuración)
 
 Preparado para:
 - Expansión de módulos analíticos

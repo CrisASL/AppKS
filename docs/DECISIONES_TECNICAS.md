@@ -166,6 +166,7 @@ Sin ORM, sin archivos de migración separados, sin historial de versiones de esq
 - Las migraciones son ejecutables múltiples veces sin errores (idempotentes por definición)
 - No hay herramienta de rollback — si una migración es destructiva, se debe hacer backup manual antes
 - Convención del proyecto: nunca eliminar columnas via migración automática; solo agregar o modificar defaults
+- `migrar_base_datos_existente()` cubre tanto `requisiciones` (campos de estado, clave compuesta) como la columna `desprod` en la tabla `compras` — cualquier migración que afecte ambas tablas va aquí, no en las páginas de UI
 
 ---
 
@@ -209,3 +210,70 @@ if key not in st.session_state or st.session_state[key] is None:
 - Punto único de acceso facilita debugging y mantenimiento
 - Eliminar cubos requiere `.pop()` en lugar de asignación `= None`
 - Compatible con arquitectura existente sin cambios en BD
+
+---
+
+## ADR-008 – Normalización de estados ERP en sincronización REQ→OC
+
+**Estado:** Aceptado  
+**Versión:** v1.8.2  
+
+### Contexto
+El campo `estado_linea` de Softland ERP usa valores propios (`'Recibido'`, `'Sin Recepción'`, `'Parcial'`) que no pertenecen a `config.ESTADOS_OC`. Al copiar ese valor directamente a `estado_oc` en requisiciones, el gráfico de torta perdía sus colores y los filtros por estado retornaban 0 resultados.
+
+### Decisión
+Interponer un diccionario `_MAPA_ESTADO_ERP` local a `actualizar_requisiciones_desde_compras()` y un `CASE` SQL equivalente en el Step 3 (pure SQL):
+
+```python
+_MAPA_ESTADO_ERP = {
+    "Recibido":      "Recepción Completa",
+    "Sin Recepción": "OC Generada",
+    "Parcial":       "Recepción Parcial",
+}
+```
+
+La migración en `migrar_base_datos_existente()` normaliza datos históricos con un `UPDATE ... CASE` idempotente.
+
+### Consecuencias
+- Todos los valores de `estado_oc` pertenecen al catálogo `config.ESTADOS_OC`
+- `COLORES_ESTADO` y los filtros de la UI funcionan correctamente
+- Agregar nuevos estados ERP requiere actualizar solo `_MAPA_ESTADO_ERP` y el CASE SQL
+- La migración es idempotente: múltiples ejecuciones no generan cambios duplicados
+- `COLORES_ESTADO` en `config.py` incluye los alias ERP (`'Recibido'`, `'Sin Recepción'`, `'Parcial'`) como respaldo: si algún registro llega sin normalizar (edge-case), el gráfico de torta igual muestra un color coherente
+
+---
+
+## ADR-009 – Validación two-pass con rechazo atómico en carga masiva
+
+**Estado:** Aceptado  
+**Versión:** v1.8.4
+
+### Contexto
+`cargar_requisiciones_desde_cubo()` validaba y escribía fila a fila en el mismo loop. Si el archivo tenía errores a mitad del recorrido, los registros anteriores ya estaban confirmados en BD. Si una excepción de BD ocurría a mitad de la carga, no había forma de revertir las inserciones anteriores de esa misma carga.
+
+### Decisión
+Separar el procesamiento en dos fases estrictamente secuenciales:
+
+```python
+# FASE 1 – solo validación, ninguna escritura en BD
+filas_validas = []
+for row in df:
+    # validar; acumular errores
+    filas_validas.append(datos_normalizados)
+
+if mensajes_error:
+    return 0, len(mensajes_error), mensajes_error  # rechazar todo
+
+# FASE 2 – inserción atómica
+with get_db_connection() as conn:  # commit en exit, rollback en exception
+    for datos in filas_validas:
+        cursor.execute("INSERT OR IGNORE ...", datos)
+```
+
+Complementado con `validar_filas_requisiciones()` en `utils.py`, llamada como `pre_save_validator` antes de guardar el hash del archivo — si falla la validación, el mismo archivo puede subirse de nuevo sin que el sistema lo considere "ya procesado".
+
+### Consecuencias
+- La BD nunca queda en estado parcialmente cargado: o se insertan todos los registros válidos o ninguno
+- El usuario ve la tabla de errores completa antes de cualquier escritura y puede corregir el archivo
+- `get_db_connection()` ya implementaba commit/rollback — solo fue necesario eliminar el `try/except` interno por fila en la FASE 2
+- Si el archivo tiene filas válidas y una inválida, se rechaza completo; el usuario debe corregir el archivo fuente

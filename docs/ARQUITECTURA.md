@@ -43,6 +43,7 @@ AppKS/
 │   │       └── view.py         # Vista Streamlit del módulo
 │   │
 │   └── services/               # Servicios de persistencia por cubo
+│       ├── check_consistencia.py   # Diagnóstico de consistencia REQ↔OC
 │       ├── compras_service.py
 │       └── ventas_inventario_service.py
 │
@@ -152,10 +153,12 @@ AppKS/
 
 - CRUD completo para `requisiciones`, `historial_cambios`, `cargas_diarias` y tablas raw
 - Inicialización de esquema, índices y triggers al arrancar
-- **`actualizar_requisiciones_desde_compras()`**: sincronización REQ→OC mediante un único `UPDATE ... WHERE EXISTS` con subconsultas correlacionadas y `julianday()` para aritmética de fechas (ventana 0–90 días, cantidad OC ≥ 80% de REQ, selecciona OC más cercana en el tiempo)
-- **`cargar_requisiciones_desde_cubo()`**: `INSERT OR IGNORE` con `UNIQUE(numreq, codprod)`; sin pre-SELECT de tabla completa
+- **`actualizar_requisiciones_desde_compras()`**: sincronización REQ→OC en 3 pasos (proveedor de respaldo, match por observación, match automático). Normaliza `estado_linea` del ERP mediante `_MAPA_ESTADO_ERP` (Python) y CASE SQL antes de escribir `estado_oc`, garantizando coherencia con `config.ESTADOS_OC`
+- **`actualizar_requisicion_desde_ui()`**: normaliza `fecha_oc` a `YYYY-MM-DD` con `dayfirst=True` antes de persistir; validación por whitelist para `estado_envio` y `estado_req`
+- **`cargar_requisiciones_desde_cubo()`**: patrón two-pass — FASE 1 valida todas las filas sin escribir en BD (rechaza si hay errores); FASE 2 inserta en transacción atómica vía `get_db_connection()` con rollback automático. `INSERT OR IGNORE` con `UNIQUE(numreq, codprod)`
 - **`get_or_load_cubo()`**: rehidratación automática de cubos desde SQLite con validación robusta
-- Migraciones idempotentes: `migrar_base_datos_existente()`, ejecutable múltiples veces al arrancar
+- **`obtener_estadisticas_generales()`**: retorna `total_req` (conteo real de filas) además de pendientes, tránsito y productos
+- Migraciones idempotentes: `migrar_base_datos_existente()`, cubre `requisiciones` y columna `desprod` en `compras`; ejecutable múltiples veces al arrancar
 - Limpieza de cubos: `limpiar_cubo_*()` elimina tablas operacionales + raw + hashes
 
 ### `app/modules/analisis_stock/`
@@ -186,6 +189,12 @@ Cruce entre cubo de Inventario y cubo de Ventas histórico para KS Talca.
 - Persiste cubos de Ventas e Inventario en SQLite
 - **Control por hash MD5**: evita reprocesar archivos Excel sin cambios
 - Tabla `archivos_cargados` registra última carga por cubo
+
+### `app/services/check_consistencia.py`
+
+- Diagnóstico de consistencia entre `requisiciones` y `compras`
+- 4 checks: **OC sin REQ** / **REQ sin OC** (>14 días sin OC, guía ni observación) / **Montos descuadrados** (`ABS(total_linea − precio × cantidad) > 1`) / **Recepciones excedidas** (`recibida + manual > solicitada + 0.01`)
+- `ejecutar_diagnostico()`: corre los 4 checks en una sola conexión, retorna DataFrames + resumen con conteos por severidad
 
 ---
 
@@ -235,6 +244,14 @@ Excel (Softland ERP)
 | Invalidación de caché en limpieza | `main.py` → `st.cache_data.clear()` + loop `session_state` + `st.rerun()` |
 | Override masivo de estado via session state | `main.py` → `estado_envio_override` / `st.rerun()` |
 | Edición segura en 4 capas | UI → `utils.py` → `CAMPOS_EDITABLES_UI` (backend) → triggers SQL |
+| Normalización de estados ERP → estados internos | `database.py` → `_MAPA_ESTADO_ERP` + CASE SQL en sync REQ→OC |
+| AGGrid key dinámico por filtros activos | `main.py` → `_grid_key = f"aggrid_req_{hash(...)}"` |
+| `set_page_config` como primera llamada Streamlit | `main.py` → `_startup_errors[]` + display en `main()` |
+| Backup WAL-safe con checkpoint previo | `main.py` → `PRAGMA wal_checkpoint(FULL)` antes de `shutil.copy2` |
+| Normalización de `fecha_oc` a `YYYY-MM-DD` al guardar | `database.py` → `actualizar_requisicion_desde_ui()` con `dayfirst=True` |
+| Acceso a `session_state` por índice `[]` | `main.py` → `_widget_cubo_uploader()` — evita problemas de serialización |
+| Validación two-pass con rechazo total antes de INSERT masivo | `utils.py` → `validar_filas_requisiciones()` + `database.py` → `cargar_requisiciones_desde_cubo()` |
+| `pre_save_validator` inyectable en widget de carga | `main.py` → `_widget_cubo_uploader(pre_save_validator=...)` |
 
 ---
 

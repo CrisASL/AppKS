@@ -21,6 +21,7 @@ from app.cache import get_table, invalidar_cache
 from app.services import compras_service
 from app.services import check_consistencia
 from app.modules.analisis_stock import view as analisis_stock_view
+from app.ui import inject_css, kpi_hero, kpi_card, empty_state, section_label
 
 
 # ============================================================================
@@ -79,6 +80,15 @@ def inicializar_session_state():
         if key not in st.session_state:
             st.session_state[key] = default
 
+    # ── Auto-set datos_cargados si cubos principales están en DB ─────────────
+    if not st.session_state.get("datos_cargados"):
+        cubo_req = st.session_state.get("cubo_requisiciones")
+        cubo_comp = st.session_state.get("cubo_compras")
+        if (cubo_req is not None and not cubo_req.empty) or (
+            cubo_comp is not None and not cubo_comp.empty
+        ):
+            st.session_state["datos_cargados"] = True
+
 
 inicializar_session_state()
 
@@ -91,41 +101,78 @@ inicializar_session_state()
 def crear_sidebar():
     """Crea el sidebar con navegación y información del usuario."""
     with st.sidebar:
-        st.title(config.APP_TITLE)
-        st.divider()
+        # Header: logo + nombre de app
+        st.markdown(
+            """
+            <div class="ks-sidebar-logo">
+                <div class="ks-sidebar-logo-icon">📦</div>
+                <div class="ks-sidebar-logo-text">
+                    <div class="ks-sidebar-logo-title">KS Seguridad</div>
+                    <div class="ks-sidebar-logo-sub">Gestión de compras</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        # Información del usuario
-        st.markdown(f"**👤 Usuario:** {config.USUARIO_ACTUAL}")
-        st.markdown(f"**🏢 Sucursal:** {config.SUCURSAL_ASIGNADA}")
-        st.markdown(f"**📅 Fecha:** {datetime.now().strftime('%A, %d %B %Y')}")
+        # Info de usuario compacta
+        fecha_str = datetime.now().strftime("%d %b %Y")
+        st.markdown(
+            f"""
+            <div class="ks-sidebar-user">
+                <div class="ks-sidebar-user-row">
+                    <span class="ks-sidebar-user-icon">👤</span>
+                    <span class="ks-sidebar-user-text"><b>{config.USUARIO_ACTUAL}</b></span>
+                </div>
+                <div class="ks-sidebar-user-row">
+                    <span class="ks-sidebar-user-icon">🏢</span>
+                    <span class="ks-sidebar-user-text">{config.SUCURSAL_ASIGNADA}</span>
+                </div>
+                <div class="ks-sidebar-user-row">
+                    <span class="ks-sidebar-user-icon">📅</span>
+                    <span class="ks-sidebar-user-text">{fecha_str}</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-        st.divider()
+        # Sección PRINCIPAL
+        section_label("PRINCIPAL")
 
-        # Menú de navegación
-        st.markdown("### 📋 Navegación")
-
-        for opcion in config.MENU_OPTIONS:
-            if st.button(opcion, width="stretch"):
-                st.session_state.pagina_actual = opcion
+        nav_principal = [
+            ("📊 Dashboard", "📊 Dashboard"),
+            ("📋 Gestión Requisiciones", "📋 Gestión Requisiciones"),
+            ("🛒 Seguimiento OC", "🛒 Seguimiento OC"),
+            ("📈 Análisis Stock", "📈 Análisis Stock"),
+        ]
+        for label, key in nav_principal:
+            if st.button(label, key=f"nav_{key}", use_container_width=True):
+                st.session_state.pagina_actual = key
                 st.rerun()
 
-        st.divider()
+        # Sección OTROS
+        section_label("OTROS")
+        if st.button("⚙️ Configuración", key="nav_config", use_container_width=True):
+            st.session_state.pagina_actual = "⚙️ Configuración"
+            st.rerun()
 
-        # Indicadores de cubos cargados
-        st.markdown("### 📦 Estado de Cubos")
+        st.markdown("<br>", unsafe_allow_html=True)
 
+        # Estado de cubos — colapsado al fondo
         estado_cubos = [
             ("Requisiciones", st.session_state.cubo_requisiciones),
             ("Compras", st.session_state.cubo_compras),
             ("Ventas", st.session_state.cubo_ventas),
             ("Inventario", st.session_state.cubo_inventario),
         ]
-
-        for nombre, cubo in estado_cubos:
-            if cubo is not None and not cubo.empty:
-                st.success(f"✅ {nombre}")
-            else:
-                st.warning(f"⚠️ {nombre}")
+        cargados = sum(1 for _, c in estado_cubos if c is not None and not c.empty)
+        with st.expander(f"📦 Cubos ({cargados}/4)", expanded=False):
+            for nombre, cubo in estado_cubos:
+                if cubo is not None and not cubo.empty:
+                    st.success(f"✅ {nombre}", icon=None)
+                else:
+                    st.warning(f"⚠️ {nombre}", icon=None)
 
 
 # ============================================================================
@@ -260,9 +307,7 @@ def _widget_cubo_uploader(
             st.session_state.pop(session_key, None)
             st.warning(warning_msg)
         else:
-            st.info(
-                f"🗄️ {info_msg_prefix} cargados desde base de datos ({_count} registros). Sube un nuevo archivo para actualizar."
-            )
+            st.caption(f"✅ {info_msg_prefix}: {_count:,} registros cargados · Sube un archivo para actualizar")
 
     if archivo:
         hash_nuevo = db.calcular_hash_archivo(archivo)
@@ -309,9 +354,7 @@ def _widget_cubo_uploader(
             df_sqlite = db.cargar_cubo_raw(tipo)
             if df_sqlite is not None:
                 st.session_state[session_key] = df_sqlite
-                st.info(
-                    f"ℹ️ Archivo sin cambios — datos cargados desde base de datos ({len(df_sqlite)} registros)"
-                )
+                st.caption(f"✓ Sin cambios — {len(df_sqlite):,} registros ya en base de datos")
             else:
                 df = cargar_cubo_excel(archivo, tipo, excel_key_prefix)
                 if df is not None:
@@ -326,10 +369,21 @@ def _widget_cubo_uploader(
     return archivo
 
 
+def _auto_cargar_compras(df):
+    """Wrapper para auto-trigger UPSERT de compras al subir el archivo."""
+    compras_service.crear_tabla_compras()
+    with compras_service.get_db_connection() as conn:
+        insertados, actualizados, sin_cambios, errores_list = (
+            compras_service.cargar_compras_desde_dataframe(df, conn)
+        )
+    db.actualizar_requisiciones_desde_compras()
+    total_ok = insertados + actualizados
+    return total_ok, len(errores_list), errores_list
+
+
 def seccion_carga_cubos():
     """Sección para cargar los 4 cubos Excel."""
-    st.header("📥 Cargar Cubos Excel")
-    st.markdown("Carga los archivos Excel exportados desde Power Query.")
+    st.caption("Carga los archivos Excel exportados desde Power Query.")
 
     col1, col2 = st.columns(2)
 
@@ -369,152 +423,12 @@ def seccion_carga_cubos():
             uploader_key="upload_compras",
             uploader_help="Cubo con órdenes de compra",
             session_key="cubo_compras",
-            spinner_msg="Guardando compras en base de datos...",
+            spinner_msg="Procesando compras en base de datos...",
             warning_msg="No hay compras cargadas. Sube un archivo para iniciar.",
             info_msg_prefix="Compras",
             excel_key_prefix="compras",
+            post_save_fn=_auto_cargar_compras,
         )
-
-        df = st.session_state.cubo_compras
-        if df is not None:
-            # Diagnóstico de fechas
-            with st.expander("🔍 Diagnóstico de Columnas de Fecha", expanded=False):
-                st.markdown("**Verificación de columnas FechaOC y FechaRecepcion:**")
-
-                # Verificar FechaOC
-                if "FechaOC" in df.columns:
-                    st.write(f"**FechaOC:**")
-                    st.write(f"- Tipo de dato: `{df['FechaOC'].dtype}`")
-                    st.write(
-                        f"- Valores no nulos: {df['FechaOC'].notna().sum()}/{len(df)}"
-                    )
-                    st.write(f"- Primeros 3 valores:")
-                    st.code(df["FechaOC"].head(3).tolist())
-
-                    # Verificar si son números (seriales de Excel)
-                    if pd.api.types.is_numeric_dtype(df["FechaOC"]):
-                        st.warning(
-                            "⚠️ FechaOC está como número (serial de Excel). Se convertirá al cargar."
-                        )
-                        # Mostrar ejemplo de conversión
-                        ejemplo_serial = (
-                            df["FechaOC"].dropna().iloc[0]
-                            if len(df["FechaOC"].dropna()) > 0
-                            else None
-                        )
-                        if ejemplo_serial:
-                            try:
-                                fecha_convertida = pd.to_datetime(
-                                    ejemplo_serial, unit="D", origin="1899-12-30"
-                                )
-                                st.info(
-                                    f"Ejemplo: {ejemplo_serial} → {fecha_convertida.strftime('%Y-%m-%d')}"
-                                )
-                            except:
-                                st.error("No se pudo convertir el valor de ejemplo")
-                    else:
-                        st.success("✓ FechaOC está como texto/fecha")
-                else:
-                    st.error("❌ No se encontró la columna 'FechaOC'")
-
-                st.markdown("---")
-
-                # Verificar FechaRecepcion (opcional)
-                if "FechaRecepcion" in df.columns:
-                    st.write(f"**FechaRecepcion:**")
-                    st.write(f"- Tipo de dato: `{df['FechaRecepcion'].dtype}`")
-                    st.write(
-                        f"- Valores no nulos: {df['FechaRecepcion'].notna().sum()}/{len(df)}"
-                    )
-                    if pd.api.types.is_numeric_dtype(df["FechaRecepcion"]):
-                        st.warning(
-                            "⚠️ FechaRecepcion está como número (serial de Excel). Se convertirá al cargar."
-                        )
-
-            # Botón para insertar en base de datos (idempotente)
-            if st.button(
-                "💾 Cargar a Base de Datos",
-                key="btn_cargar_compras",
-                type="primary",
-            ):
-                with st.spinner("Preparando base de datos..."):
-                    try:
-                        # Crear tabla si no existe y ejecutar migraciones
-                        compras_service.crear_tabla_compras()
-
-                        with st.spinner("Insertando datos en base de datos..."):
-                            # Cargar datos de forma idempotente con UPSERT
-                            with compras_service.get_db_connection() as conn:
-                                insertados, actualizados, sin_cambios, errores = (
-                                    compras_service.cargar_compras_desde_dataframe(
-                                        st.session_state.cubo_compras, conn
-                                    )
-                                )
-
-                            # Mostrar resultados
-                            col_ins, col_act, col_sin = st.columns(3)
-                            with col_ins:
-                                st.metric(
-                                    "📥 Insertados",
-                                    insertados,
-                                    help="Registros nuevos insertados",
-                                )
-                            with col_act:
-                                st.metric(
-                                    "🔄 Actualizados",
-                                    actualizados,
-                                    help="Registros existentes actualizados",
-                                )
-                            with col_sin:
-                                st.metric(
-                                    "✓ Sin cambios",
-                                    sin_cambios,
-                                    help="Registros que ya existían sin diferencias",
-                                )
-
-                            if errores:
-                                with st.expander(
-                                    f"⚠️ Errores ({len(errores)})", expanded=False
-                                ):
-                                    for error in errores[
-                                        :10
-                                    ]:  # Mostrar máximo 10 errores
-                                        st.error(error)
-                                    if len(errores) > 10:
-                                        st.warning(
-                                            f"... y {len(errores) - 10} errores más"
-                                        )
-                            else:
-                                st.success("🎉 Carga completada sin errores")
-
-                            # Actualizar automáticamente las requisiciones con datos de compras
-                            st.info(
-                                "🔄 Actualizando requisiciones con datos de compras..."
-                            )
-                            with st.spinner(
-                                "Sincronizando requisiciones con seguimiento OC..."
-                            ):
-                                exito_sync, mensaje_sync, actualizados_sync = (
-                                    db.actualizar_requisiciones_desde_compras()
-                                )
-
-                                if exito_sync:
-                                    st.success(
-                                        f"✅ {actualizados_sync} requisiciones actualizadas con datos de compras"
-                                    )
-                                else:
-                                    # Si falla pero no es crítico, mostrar como info
-                                    if "no existe" in mensaje_sync.lower():
-                                        st.info(mensaje_sync)
-                                    else:
-                                        st.warning(mensaje_sync)
-
-                    except Exception as e:
-                        st.error(f"❌ Error al cargar datos: {str(e)}")
-
-            st.info(
-                "💡 **Carga Idempotente con UPSERT**: Puedes cargar el mismo cubo múltiples veces. Los registros nuevos se insertarán, los existentes se actualizarán si hay cambios, o se mantendrán sin cambios si son idénticos."
-            )
 
         st.markdown("---")
 
@@ -548,15 +462,27 @@ def seccion_carga_cubos():
 def pagina_dashboard():
     """Página principal con KPIs operativos y gráficos de gestión de requisiciones."""
     st.title("📊 Dashboard - Gestión de Requisiciones")
+    st.caption("Gestión de compras · KS Seguridad Industrial")
 
-    # Sección de carga de cubos
-    seccion_carga_cubos()
+    # Sección de carga de cubos — colapsada si ya hay datos
+    cubos_cargados = st.session_state.get("datos_cargados", False)
+    with st.expander("📥 Cargar Cubos Excel", expanded=not cubos_cargados):
+        seccion_carga_cubos()
 
     st.markdown("---")
 
-    # Si no hay datos cargados mostrar mensaje y salir
-    if not st.session_state.datos_cargados:
-        st.info("ℹ️ Carga los cubos Excel para ver el dashboard completo")
+    # Si no hay cubos cargados mostrar mensaje y salir
+    _req = st.session_state.get("cubo_requisiciones")
+    _comp = st.session_state.get("cubo_compras")
+    _hay_datos = (_req is not None and not _req.empty) or (
+        _comp is not None and not _comp.empty
+    )
+    if not _hay_datos:
+        empty_state(
+            icon="📥",
+            title="Sin datos cargados",
+            subtitle="Sube los cubos Excel desde la sección de arriba para ver el dashboard",
+        )
         return
 
     # -------------------------------------------------------------------------
@@ -602,41 +528,43 @@ def pagina_dashboard():
     # -------------------------------------------------------------------------
     # KPIs PRINCIPALES
     # -------------------------------------------------------------------------
-    st.subheader("📊 Indicadores Principales")
-
     kpis = db.obtener_kpis_dashboard(
         fecha_desde=f_desde,
         fecha_hasta=f_hasta,
         numreq=f_numreq,
     )
 
-    col1, col2, col3, col4 = st.columns(4)
-
+    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
     with col1:
-        st.metric(
-            "REQ Pendientes",
-            kpis["req_pendientes"],
-            help="Requisiciones sin OC, sin guía y sin observación registrada",
+        kpi_hero(
+            label="REQ Pendientes",
+            value=kpis["req_pendientes"],
+            icon="📋",
+            help_text="Sin OC, guía ni observación registrada",
         )
     with col2:
-        st.metric(
-            "OC Emitidas",
-            kpis["oc_emitidas"],
-            help="Requisiciones con número de OC asignado",
+        kpi_card(
+            label="OC Emitidas",
+            value=kpis["oc_emitidas"],
+            icon="🛒",
+            help_text="Con número de OC asignado",
         )
     with col3:
-        st.metric(
-            "OC Enviadas",
-            kpis["oc_enviadas"],
-            help="OC con estado de envío 'Enviado'",
+        kpi_card(
+            label="OC Enviadas",
+            value=kpis["oc_enviadas"],
+            icon="✅",
+            help_text="Estado de envío: Enviado",
         )
     with col4:
-        st.metric(
-            "OC No Enviadas",
-            kpis["oc_no_enviadas"],
-            help="OC emitidas con estado de envío 'No Enviado'",
+        kpi_card(
+            label="OC No Enviadas",
+            value=kpis["oc_no_enviadas"],
+            icon="⏳",
+            help_text="OC emitidas pendientes de envío",
         )
 
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
     st.markdown("---")
 
     # -------------------------------------------------------------------------
@@ -678,7 +606,7 @@ def pagina_dashboard():
 """
                 )
         else:
-            st.info("No hay datos de requisiciones aún")
+            empty_state("📊", "Sin datos de requisiciones", "Carga el cubo de requisiciones para ver este gráfico")
 
     with col_right:
         st.subheader("🏆 Top 10 Productos — Últimos 30 Días")
@@ -704,7 +632,7 @@ def pagina_dashboard():
             )
             st.plotly_chart(fig2, use_container_width=True)
         else:
-            st.info("No hay requisiciones en los últimos 30 días")
+            empty_state("🏆", "Sin movimientos recientes", "No hay requisiciones en los últimos 30 días")
 
     st.markdown("---")
 
@@ -745,9 +673,8 @@ def pagina_dashboard():
     # -------------------------------------------------------------------------
     # PRODUCTOS CON STOCK CRÍTICO
     # -------------------------------------------------------------------------
+    st.subheader("⚠️ Productos con Stock Crítico")
     if st.session_state.cubo_inventario is not None:
-        st.subheader("⚠️ Productos con Stock Crítico")
-
         df_criticos = utils.obtener_productos_criticos(st.session_state.cubo_inventario)
 
         if not df_criticos.empty:
@@ -769,7 +696,9 @@ def pagina_dashboard():
                 },
             )
         else:
-            st.success("✅ No hay productos con stock crítico")
+            empty_state("✅", "Sin stock crítico", "Todos los productos tienen stock suficiente")
+    else:
+        empty_state("📦", "Cubo de inventario no cargado", "Sube el archivo de inventario para ver este indicador")
 
 
 # ============================================================================
@@ -2332,6 +2261,9 @@ def pagina_configuracion():
 
 def main():
     """Función principal que maneja el enrutamiento de páginas."""
+
+    # CSS global — va primero para que esté disponible en todo el render
+    inject_css()
 
     # Mostrar errores de arranque capturados antes de set_page_config
     for _nivel, _msg in _startup_errors:

@@ -630,7 +630,37 @@ def cargar_compras_desde_dataframe(
 # CRUCE CON GESTIÓN
 # ============================================================================
 
-
+def poblar_gestion_desde_requisiciones(conn: sqlite3.Connection) -> Tuple[int, List[str]]:
+    """
+    Sincroniza gestion desde requisiciones usando INSERT OR IGNORE.
+    Idempotente: solo inserta filas que no existen aún (por UNIQUE numreq+codprod).
+    Debe llamarse ANTES de actualizar_gestion_desde_compras().
+    """
+    mensajes = []
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR IGNORE INTO gestion (
+                numreq, codprod, desprod, cantidad,
+                fecha_requisicion, sucursal_destino
+            )
+            SELECT
+                numreq, codprod, desprod, cantidad,
+                fecha_requisicion, sucursal_destino
+            FROM requisiciones
+        """)
+        insertados = cursor.rowcount
+        conn.commit()
+        if insertados > 0:
+            mensajes.append(f"✅ {insertados} filas pobladas desde requisiciones.")
+        else:
+            mensajes.append("ℹ️ Gestión ya estaba sincronizada con requisiciones.")
+        return insertados, mensajes
+    except Exception as e:
+        mensajes.append(f"❌ Error al poblar gestión: {str(e)}")
+        return 0, mensajes
+    
+    
 def actualizar_gestion_desde_compras(conn: sqlite3.Connection) -> Tuple[int, List[str]]:
     """
     Actualiza la tabla de gestión con datos de compras mediante cruce automático.
@@ -916,8 +946,12 @@ def ejecutar_proceso_completo_compras(df_compras: pd.DataFrame) -> Dict:
             resultado["carga_compras"]["sin_cambios"] = sin_cambios
             resultado["carga_compras"]["errores"] = errores
 
-            # Paso 2: Actualizar gestión
-            print("🔄 Paso 2/2: Actualizando gestión desde compras...")
+            # Paso 2: Poblar gestión desde requisiciones (idempotente)
+            print("🔄 Paso 2/3: Poblando gestión desde requisiciones...")
+            poblar_gestion_desde_requisiciones(conn)
+
+            # Paso 3: Actualizar gestión desde compras
+            print("🔄 Paso 3/3: Actualizando gestión desde compras...")
             actualizados_gestion, mensajes = actualizar_gestion_desde_compras(conn)
 
             resultado["actualizacion_gestion"]["actualizados"] = actualizados_gestion

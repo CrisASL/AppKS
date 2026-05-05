@@ -223,6 +223,7 @@ STOCK_CRITICO = 10
 
 # Ruta de la base de datos SQLite
 DB_PATH = os.path.join(BASE_DIR, "data", "ks_requisiciones.db")
+#C:\Users\crist\Desktop\Resp PC\Portafolio\AppKS\data\ks_requisiciones.db
 
 # Ruta para backups
 BACKUP_PATH = os.path.join(BASE_DIR, "backups")
@@ -267,6 +268,12 @@ COLORES_ESTADO = {
     "Recepción Completa": "#32CD32",  # Verde
     "Cancelada": "#DC143C",  # Rojo
     "No se compra": "#808080",  # Gris
+    # Estados del ERP (alias, por si llegan sin normalizar)
+    "Recibido": "#32CD32",
+    "Recibida": "#32CD32",
+    "Sin Recepción": "#4169E1",
+    "Sin Recepcion": "#4169E1",
+    "Parcial": "#FF8C00",
 }
 
 # Emojis para estados

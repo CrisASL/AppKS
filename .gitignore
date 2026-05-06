@@ -71,3 +71,6 @@ config_local.py
 *.temp
 *.bak
 *.swp
+
+# Claude Code local settings
+.claude/

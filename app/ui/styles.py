@@ -109,11 +109,20 @@ _CSS = """
     background: rgba(16,185,129,0.08) !important;
     color: #f0f2f6 !important;
 }
-[data-testid="stSidebar"] .stButton > button[data-active="true"],
-[data-testid="stSidebar"] .ks-nav-active button {
-    background: rgba(16,185,129,0.15) !important;
-    color: #10b981 !important;
-    font-weight: 600 !important;
+/* ── Nav item activo ───────────────────────────────────────── */
+.ks-nav-active-item {
+    display: flex;
+    align-items: center;
+    padding: 7px 16px;
+    margin: 1px 0;
+    border-radius: 8px;
+    background: rgba(16,185,129,0.12);
+    color: #10b981;
+    font-size: 0.85rem;
+    font-weight: 600;
+    border-left: 3px solid #10b981;
+    cursor: default;
+    letter-spacing: 0.01em;
 }
 
 /* ── KPI cards ─────────────────────────────────────────────── */

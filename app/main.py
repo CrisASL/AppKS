@@ -140,6 +140,7 @@ def crear_sidebar():
         # Sección PRINCIPAL
         section_label("PRINCIPAL")
 
+        pagina_actual = st.session_state.get("pagina_actual", "📊 Dashboard")
         nav_principal = [
             ("📊 Dashboard", "📊 Dashboard"),
             ("📋 Gestión Requisiciones", "📋 Gestión Requisiciones"),
@@ -147,15 +148,29 @@ def crear_sidebar():
             ("📈 Análisis Stock", "📈 Análisis Stock"),
         ]
         for label, key in nav_principal:
-            if st.button(label, key=f"nav_{key}", use_container_width=True):
-                st.session_state.pagina_actual = key
-                st.rerun()
+            activo = pagina_actual == key
+            if activo:
+                st.markdown(
+                    f'<div class="ks-nav-active-item">{label}</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                if st.button(label, key=f"nav_{key}", use_container_width=True):
+                    st.session_state.pagina_actual = key
+                    st.rerun()
 
         # Sección OTROS
         section_label("OTROS")
-        if st.button("⚙️ Configuración", key="nav_config", use_container_width=True):
-            st.session_state.pagina_actual = "⚙️ Configuración"
-            st.rerun()
+        activo_config = pagina_actual == "⚙️ Configuración"
+        if activo_config:
+            st.markdown(
+                '<div class="ks-nav-active-item">⚙️ Configuración</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            if st.button("⚙️ Configuración", key="nav_config", use_container_width=True):
+                st.session_state.pagina_actual = "⚙️ Configuración"
+                st.rerun()
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -709,11 +724,7 @@ def pagina_dashboard():
 def pagina_gestion_requisiciones():
     """Página para listar y filtrar requisiciones."""
     st.title("📋 Gestión de Requisiciones")
-
-    # Mensaje informativo
-    st.info(
-        "💡 Las requisiciones se cargan automáticamente al importar el cubo de requisiciones en el Dashboard"
-    )
+    st.caption("Edita OC, proveedor, estado de envío y observaciones · Los datos se sincronizan desde el cubo de requisiciones")
 
     # Panel de herramientas
     with st.expander("🔧 Herramientas", expanded=False):
@@ -884,7 +895,7 @@ def tabla_listado_requisiciones():
     df_requisiciones = db.obtener_requisiciones(filtros)
 
     if df_requisiciones.empty:
-        st.info("No se encontraron requisiciones con los filtros aplicados")
+        empty_state("🔍", "Sin resultados", "No se encontraron requisiciones con los filtros aplicados")
         return
 
     # Filtros pandas post-consulta
@@ -901,7 +912,7 @@ def tabla_listado_requisiciones():
         ]
 
     if df_requisiciones.empty:
-        st.info("No se encontraron requisiciones con los filtros aplicados")
+        empty_state("🔍", "Sin resultados", "No se encontraron requisiciones con los filtros aplicados")
         return
 
     # ── Enriquecer estado_req desde cubo de compras ─────────────────────────
@@ -959,12 +970,28 @@ def tabla_listado_requisiciones():
     n_oc_emitidas = int((~_oc_vacia).sum())
     n_oc_enviadas = int((df_m["estado_envio"] == "Enviado").sum())
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric(
-        "⏳ REQ Pendientes", n_pendientes, help="Sin OC, sin guía y sin observación"
-    )
-    m2.metric("📄 OC Emitidas", n_oc_emitidas, help="Con número de OC asignado")
-    m3.metric("✅ OC Enviadas", n_oc_enviadas, help="Con estado de envío 'Enviado'")
+    m1, m2, m3 = st.columns([2, 1, 1])
+    with m1:
+        kpi_hero(
+            label="REQ Pendientes",
+            value=n_pendientes,
+            icon="⏳",
+            help_text="Sin OC, sin guía y sin observación",
+        )
+    with m2:
+        kpi_card(
+            label="OC Emitidas",
+            value=n_oc_emitidas,
+            icon="📄",
+            help_text="Con número de OC asignado",
+        )
+    with m3:
+        kpi_card(
+            label="OC Enviadas",
+            value=n_oc_enviadas,
+            icon="✅",
+            help_text="Estado de envío: Enviado",
+        )
 
     st.markdown("---")
 
@@ -1358,56 +1385,6 @@ def pagina_seguimiento_oc():
 
             # Obtener estadísticas
             stats = compras_service.obtener_estadisticas_compras(conn)
-
-            # Gráfico de barras: estados operativos de requisiciones
-            kpis_req = db.obtener_kpis_dashboard()
-            df_req_all = db.obtener_requisiciones({})
-            req_cerradas = (
-                int((df_req_all["estado_oc"] == "Recepción Completa").sum())
-                if not df_req_all.empty
-                else 0
-            )
-            df_barras = pd.DataFrame(
-                {
-                    "Estado": [
-                        "REQ pendiente",
-                        "OC emitida",
-                        "OC enviada (estado 'Enviado')",
-                        "REQ cerrada",
-                    ],
-                    "Cantidad": [
-                        kpis_req["req_pendientes"],
-                        kpis_req["oc_emitidas"],
-                        kpis_req["oc_enviadas"],
-                        req_cerradas,
-                    ],
-                    "Color": ["#FFA500", "#4169E1", "#32CD32", "#808080"],
-                }
-            )
-            fig_barras = px.bar(
-                df_barras,
-                x="Estado",
-                y="Cantidad",
-                title="Estado de Requisiciones",
-                color="Estado",
-                color_discrete_map={
-                    "REQ pendiente": "#FFA500",
-                    "OC emitida": "#4169E1",
-                    "OC enviada": "#32CD32",
-                    "REQ cerrada": "#808080",
-                },
-                text="Cantidad",
-            )
-            fig_barras.update_traces(textposition="outside")
-            fig_barras.update_layout(
-                showlegend=False,
-                margin=dict(t=50, b=10),
-                yaxis_title="N° Requisiciones",
-                xaxis_title="",
-            )
-            st.plotly_chart(fig_barras, use_container_width=True)
-
-            st.markdown("---")
 
             # Filtros y búsqueda
             st.subheader("🔍 Filtros y Búsqueda")

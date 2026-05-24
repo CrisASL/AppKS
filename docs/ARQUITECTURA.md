@@ -36,6 +36,8 @@ AppKS/
 │   ├── config.py               # Constantes, rutas y configuración global
 │   ├── database.py             # Capa de acceso a datos (SQLite)
 │   ├── utils.py                # Validaciones y utilidades de carga Excel
+│   ├── cache.py                # Caché de lectura Excel por hash MD5
+│   ├── ui.py                   # Componentes visuales reutilizables (KPIs, CSS)
 │   │
 │   ├── modules/                # Módulos de UI por dominio
 │   │   └── analisis_stock/
@@ -62,7 +64,7 @@ AppKS/
 ```
 ┌─────────────────────────────────────────┐
 │              Streamlit UI               │  app/main.py + modules/*/view.py
-│   (sidebar, páginas, widgets, forms)    │
+│   (sidebar, páginas, widgets, forms)    │  app/ui.py (CSS, KPI components)
 └────────────────────┬────────────────────┘
                      │
 ┌────────────────────▼────────────────────┐
@@ -148,6 +150,23 @@ AppKS/
 ---
 
 ## 📦 Módulos y Servicios
+
+### `app/ui.py`
+
+Componentes visuales reutilizables. Centraliza el CSS y los widgets de presentación para mantener `main.py` limpio.
+
+- **`inject_css()`**: inyecta los estilos globales de la app (sidebar, navegación, colores, tipografía)
+- **`kpi_hero()`**: métrica principal de tamaño grande con delta opcional
+- **`kpi_card()`**: métrica secundaria compacta
+- **`empty_state()`**: placeholder con ícono, título y subtítulo para secciones sin datos
+- **`section_label()`**: etiqueta de sección para el sidebar
+
+### `app/cache.py`
+
+Caché de lectura de archivos Excel con `@st.cache_data`.
+
+- **`cargar_excel()`**: lee una hoja específica de un Excel. La clave de caché combina hash MD5 del archivo + nombre de hoja + tipo de cubo, invalidando automáticamente si cualquiera de estos cambia
+- Incluye lógica de limpieza para tablas pivot de Softland (detección de header real, eliminación de filas `"(en blanco)"` y `"Total"`)
 
 ### `app/database.py`
 

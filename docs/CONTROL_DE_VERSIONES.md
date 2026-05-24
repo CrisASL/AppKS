@@ -783,40 +783,82 @@ Proteger la carga de requisiciones contra archivos mal formados y proveer visibi
 
 ---
 
-# 📍 Estado Actual del Proyecto
+## 🔹 v1.9.0 – Rediseño Visual
 
-El proyecto se encuentra actualmente en la versión:
+### 🎯 Objetivo
+Modernizar la interfaz sin cambiar la lógica de negocio ni la estructura de datos.
 
-## 🔹 **v1.8.4**
+### 🏗️ Implementado
 
-Sistema completo de gestión de requisiciones, compras y análisis de stock con:
-- **Validación two-pass de Excel**: rechazo total ante errores — ningún registro se inserta si el archivo tiene errores de columnas, tipos o duplicados `(NumReq, CodProd)`
-- **Carga atómica de requisiciones**: FASE 1 valida todo, FASE 2 inserta en transacción única con rollback automático
-- **Panel de diagnóstico REQ↔OC**: 4 checks de consistencia (OC sin REQ, REQ sin OC, montos descuadrados, recepciones excedidas)
-- **Tab 🔍 Diagnóstico** en ⚙️ Configuración
-- **0 bugs abiertos** — auditoría semana 1 completada (13/13 cerrados)
-- **Estado de envío textual** (`estado_envio TEXT`) con dropdown, validación por whitelist y cell styles JS
-- **Persistencia robusta de datos** con rehidratación automática desde SQLite
-- **Normalización de estados OC del ERP** con `_MAPA_ESTADO_ERP` y CASE SQL — estados coherentes con `config.ESTADOS_OC`
-- **Backup WAL-safe** con `PRAGMA wal_checkpoint(FULL)` antes de copia
-- **AGGrid key dinámico** por filtros activos — sin mezcla de ediciones entre búsquedas
-- **Inicialización estable**: `set_page_config` es siempre la primera llamada Streamlit
-- **`fecha_oc` normalizada** a `YYYY-MM-DD` al guardar desde UI (`dayfirst=True`)
-- **Métricas correctas**: "Total Requisiciones" usa conteo real; "Productos con Saldo Pendiente" reemplaza el label incorrecto
-- **Migraciones completas**: `migrar_base_datos_existente()` cubre `requisiciones` y `compras`
-- Acciones masivas de marcado de envío preservadas en session state
-- Seguimiento avanzado de órdenes de compra con filtros de texto
-- Sincronización automática REQ→OC: pure SQL (`UPDATE...WHERE EXISTS`, `julianday()`), ventana 0–90 días, sin loops Python
-- Módulo de Análisis Stock: estado de stock y rotación de productos
-- Persistencia de los 4 cubos con control por hash MD5
-- Invalidación completa de caché al eliminar cubos (tablas raw + hashes + session state)
-- Control granular de eliminación de datos
-- **Launcher `.exe` minimalista** (`start_app.py` + PyInstaller `--onefile`)
-- Sistema de migraciones automáticas de base de datos
-- **Validación two-pass de Excel** con rechazo total y transacción atómica en carga de requisiciones
-- **Panel de diagnóstico** REQ↔OC con 4 checks de consistencia (tab 🔍 Diagnóstico en Configuración)
+#### Módulo `app/ui.py`
+- `inject_css()`: estilos globales inyectados al inicio de cada render (sidebar, navegación, colores)
+- `kpi_hero()` / `kpi_card()`: componentes KPI reutilizables con jerarquía visual
+- `empty_state()`: placeholder consistente para secciones sin datos
+- `section_label()`: etiqueta de sección para el sidebar
 
-Preparado para:
-- Expansión de módulos analíticos
-- Integración con nuevos cubos de Softland
-- Reportería automatizada personalizada
+#### Sidebar rediseñado
+- Logo + nombre de app en la cabecera
+- Info de usuario compacta (nombre, sucursal, fecha)
+- Navegación con indicador de pestaña activa (item activo renderizado como `div`, no como botón)
+- Estado de cubos colapsado al fondo como expander `📦 Cubos (N/4)`
+
+#### Dashboard y Gestión Requisiciones
+- KPIs con `kpi_hero` y `kpi_card` en lugar de `st.metric` genéricos
+- Empty states descriptivos cuando no hay datos cargados
+
+### 📈 Resultado
+✅ Interfaz visualmente consistente y limpia  
+✅ Componentes reutilizables — nuevas páginas heredan el estilo sin CSS adicional  
+✅ Sin cambios en lógica, base de datos ni estructura de módulos  
+
+---
+
+## 🔹 v1.9.1 – Correcciones y Dashboard Interactivo
+
+### 🎯 Objetivo
+Corregir el selector de hojas Excel y agregar drill-down interactivo al dashboard.
+
+### 🐛 Bugs Corregidos
+
+#### Selector de hoja Excel no funcionaba
+- El `st.selectbox` de selección de hoja vivía dentro de `cargar_excel_con_selector_hoja()`, que solo se ejecutaba si el hash del archivo había cambiado. En el rerun que Streamlit lanza al interactuar con el selectbox, el hash ya coincidía → el selector desaparecía y siempre se cargaba la primera hoja.
+- **Solución**: selector movido al nivel de `_widget_cubo_uploader()`, antes de la comparación de hash. La hoja elegida se persiste en `configuracion` con clave `hoja_cubo_{tipo}`. El cache-hit ahora requiere hash **y** hoja coincidan.
+- Instalado `pyxlsb==1.0.10` (estaba en `requirements.txt` pero faltaba en el entorno).
+
+### 🏗️ Mejoras
+
+#### Dashboard interactivo — detalle por estado de OC
+- Gráfico de torta mantiene su rol visual (distribución porcentual)
+- `st.pills()` debajo de la torta permite seleccionar un estado con un click
+- Columna derecha muestra tabla de requisiciones filtradas por el estado elegido: N° REQ, Descripción, Cant., N° OC, Proveedor, Fecha OC, Recibido
+- Sin selección → placeholder `"👆 Selecciona un estado"`
+- Nota técnica: `on_select` de Streamlit no captura clicks en slices de torta (hookea en `plotly_selected`, no `plotly_click`) — pills resuelven la interacción de forma nativa (ver ADR-012)
+
+#### Top 10 Productos reubicado
+- Movido de columna derecha (junto a la torta) a sección independiente centrada debajo del gráfico (`st.columns([1, 4, 1])`)
+- Título centrado con markdown
+
+#### Seguimiento OC — limpieza de métricas
+- Eliminadas 3 métricas del "Resumen de Resultados" que no aportaban a la operación: Cant. Solicitada Total, Cant. Recibida Total, Valor Total Filtrado
+- Se mantiene solo **Total Líneas**
+
+### 📈 Resultado
+✅ Selector de hoja funcional en los 4 cubos con archivos multi-hoja  
+✅ Dashboard permite drill-down por estado sin salir de la página  
+✅ Interfaz de Seguimiento OC más limpia y enfocada  
+
+---
+
+# 📍 Versión Actual
+
+**v1.9.1** — Mayo 2026
+
+| Área | Estado |
+|---|---|
+| Gestión de Requisiciones | ✅ Operativo — edición inline, validación two-pass, carga atómica |
+| Seguimiento OC | ✅ Operativo — UPSERT inteligente, sync REQ→OC pure SQL |
+| Análisis Stock | ✅ Operativo — clasificación por stock y rotación |
+| Dashboard | ✅ Operativo — KPIs, torta interactiva, Top 10 |
+| Configuración / Diagnóstico | ✅ Operativo — 4 checks REQ↔OC, limpieza granular, backup WAL-safe |
+| Interfaz | ✅ Rediseñada — CSS injection, sidebar jerarquizado, componentes KPI |
+| Empaquetado | ✅ Launcher `.exe` ~8 MB |

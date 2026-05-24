@@ -277,3 +277,82 @@ Complementado con `validar_filas_requisiciones()` en `utils.py`, llamada como `p
 - El usuario ve la tabla de errores completa antes de cualquier escritura y puede corregir el archivo
 - `get_db_connection()` ya implementaba commit/rollback — solo fue necesario eliminar el `try/except` interno por fila en la FASE 2
 - Si el archivo tiene filas válidas y una inválida, se rechaza completo; el usuario debe corregir el archivo fuente
+
+---
+
+## ADR-010 – Rediseño visual con CSS injection y módulo `app/ui.py`
+
+**Estado:** Aceptado  
+**Versión:** v1.9.0
+
+### Contexto
+La interfaz original usaba componentes Streamlit estándar sin personalización visual. El sidebar mezclaba navegación, estado de cubos e información del usuario sin jerarquía clara. Los KPIs del dashboard eran `st.metric` genéricos dispersos en el código.
+
+### Decisión
+Crear `app/ui.py` como módulo centralizado de presentación con dos responsabilidades:
+1. `inject_css()`: inyecta CSS global via `st.markdown(unsafe_allow_html=True)` al inicio de cada render
+2. Funciones de componentes reutilizables: `kpi_hero`, `kpi_card`, `empty_state`, `section_label`
+
+El sidebar se reorganizó con jerarquía explícita: logo → usuario → secciones de navegación → estado de cubos colapsado.
+
+### Consecuencias
+- `main.py` queda limpio de HTML/CSS inline
+- Los componentes KPI son reutilizables en cualquier página sin duplicar markup
+- CSS inyectado en cada render (sin estado persistente de estilos entre sesiones)
+- Limitación aceptada: el CSS global puede pisar estilos de componentes de terceros (AG Grid) — se resuelve con selectores más específicos si aparece el conflicto
+
+---
+
+## ADR-011 – Selector de hoja Excel movido fuera del flujo de hash
+
+**Estado:** Aceptado  
+**Versión:** v1.9.1
+
+### Contexto
+El selector de hoja (`st.selectbox`) vivía dentro de `cargar_excel_con_selector_hoja()` en `utils.py`, que se llamaba solo si el hash del archivo era distinto al guardado. Streamlit rerrunea el script al interactuar con el selectbox, y en ese rerun el hash ya coincide, por lo que el código tomaba el atajo de SQLite y nunca volvía a mostrar el selector. Resultado: la primera hoja siempre se cargaba sin posibilidad de cambiarla.
+
+### Decisión
+Mover la detección de hojas y el `st.selectbox` al nivel de `_widget_cubo_uploader()`, antes de la comparación de hash. La hoja seleccionada se incorpora a la condición de cache-hit:
+
+```python
+if hash_nuevo == hash_guardado and hoja_seleccionada == hoja_guardada:
+    # cargar desde SQLite
+else:
+    # procesar Excel con la hoja seleccionada
+```
+
+La hoja se persiste en la tabla `configuracion` con clave `hoja_cubo_{tipo}` al guardar.
+
+### Consecuencias
+- El selectbox es un widget stateful de Streamlit — sobrevive reruns sin perder la selección
+- Cambiar de hoja en el mismo archivo fuerza recarga aunque el hash coincida
+- La hoja se almacena junto al hash, lo que hace el estado de carga completamente reproducible
+- `cargar_cubo_excel()` recibe la hoja como parámetro y bypasea el selector redundante de `utils.py`
+
+---
+
+## ADR-012 – Pills como selector de estado en dashboard en lugar de `on_select` de Plotly
+
+**Estado:** Aceptado  
+**Versión:** v1.9.1
+
+### Contexto
+Se implementó `st.plotly_chart(..., on_select="rerun")` para detectar clicks en slices del gráfico de torta. En Streamlit, `on_select` hookea en el evento `plotly_selected` de Plotly.js (box/lasso select), pero los clicks en slices de torta disparan `plotly_click`, un evento diferente. La selección nunca llegaba a `pie_event.selection.points`.
+
+### Decisión
+Reemplazar `on_select` por `st.pills()` posicionado inmediatamente debajo del gráfico de torta, con los mismos estados como opciones. El gráfico de torta conserva su función visual (distribución porcentual); los pills resuelven la interacción de forma nativa y confiable.
+
+```python
+estado_sel = st.pills(
+    "Ver detalle:",
+    options=df_estados["estado_oc"].tolist(),
+    default=None,
+    key="pill_estado_oc",
+)
+```
+
+### Consecuencias
+- Funciona en cualquier versión de Streamlit ≥ 1.35 sin depender del modelo de eventos de Plotly
+- Clickear el mismo pill lo deselecciona — vuelve al placeholder sin botón adicional
+- La proximidad visual entre torta y pills mantiene la asociación conceptual sin explicación adicional
+- Si en el futuro Streamlit expone `plotly_click` nativamente, la migración es un cambio de 5 líneas

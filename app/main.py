@@ -4,6 +4,8 @@ KS Seguridad Industrial - Sucursal Talca
 Autor: Cristian Salas
 """
 
+import hashlib
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -17,7 +19,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from app import config
 from app import database as db
 from app import utils
-from app.cache import get_table, invalidar_cache
+from app.cache import get_table, invalidar_cache, cargar_excel as _cache_cargar_excel
 from app.services import compras_service
 from app.services import check_consistencia
 from app.modules.analisis_stock import view as analisis_stock_view
@@ -195,7 +197,7 @@ def crear_sidebar():
 # ============================================================================
 
 
-def cargar_cubo_excel(archivo, tipo_cubo: str, key_prefix: str = ""):
+def cargar_cubo_excel(archivo, tipo_cubo: str, key_prefix: str = "", hoja: str = None):
     """
     Carga y valida un cubo Excel con selector de hojas.
 
@@ -203,12 +205,17 @@ def cargar_cubo_excel(archivo, tipo_cubo: str, key_prefix: str = ""):
         archivo: Archivo subido por st.file_uploader
         tipo_cubo: Tipo de cubo ('requisiciones', 'compras', 'ventas', 'inventario')
         key_prefix: Prefijo único para widgets de Streamlit
+        hoja: Nombre de hoja ya seleccionada (si se omite, muestra selector)
 
     Returns:
         pd.DataFrame: DataFrame cargado o None si hay error
     """
-    # Cargar Excel con selector de hojas
-    df = utils.cargar_excel_con_selector_hoja(archivo, tipo_cubo, key_prefix)
+    if hoja:
+        file_hash = hashlib.md5(archivo.getvalue()).hexdigest()
+        archivo.seek(0)
+        df = _cache_cargar_excel(archivo, file_hash, tipo_cubo, hoja)
+    else:
+        df = utils.cargar_excel_con_selector_hoja(archivo, tipo_cubo, key_prefix)
 
     if df is None:
         return None
@@ -326,7 +333,28 @@ def _widget_cubo_uploader(
 
     if archivo:
         hash_nuevo = db.calcular_hash_archivo(archivo)
+
+        try:
+            xls = pd.ExcelFile(archivo)
+            hojas = xls.sheet_names
+            archivo.seek(0)
+        except Exception:
+            hojas = []
+            archivo.seek(0)
+
+        if len(hojas) > 1:
+            hoja_seleccionada = st.selectbox(
+                "Selecciona la hoja:",
+                options=hojas,
+                key=f"{excel_key_prefix}_selector_hoja_{tipo}",
+            )
+        elif len(hojas) == 1:
+            hoja_seleccionada = hojas[0]
+        else:
+            hoja_seleccionada = None
+
         hash_guardado = db.obtener_configuracion(f"hash_cubo_{tipo}")
+        hoja_guardada = db.obtener_configuracion(f"hoja_cubo_{tipo}")
 
         def _guardar_y_notificar(df, es_nuevo):
             # ── Validación de filas antes de guardar ─────────────────────────
@@ -347,6 +375,7 @@ def _widget_cubo_uploader(
             mensajes = []
             with st.spinner(spinner_msg):
                 db.guardar_cubo_raw(tipo, df, hash_nuevo)
+                db.guardar_configuracion(f"hoja_cubo_{tipo}", hoja_seleccionada)
                 if post_save_fn is not None:
                     insertadas, errores, mensajes = post_save_fn(df)
             if post_save_fn is not None:
@@ -365,18 +394,18 @@ def _widget_cubo_uploader(
                     f"✅ {info_msg_prefix} {verb} en base de datos ({len(df)} registros)"
                 )
 
-        if hash_nuevo == hash_guardado:
+        if hash_nuevo == hash_guardado and hoja_seleccionada == hoja_guardada:
             df_sqlite = db.cargar_cubo_raw(tipo)
             if df_sqlite is not None:
                 st.session_state[session_key] = df_sqlite
                 st.caption(f"✓ Sin cambios — {len(df_sqlite):,} registros ya en base de datos")
             else:
-                df = cargar_cubo_excel(archivo, tipo, excel_key_prefix)
+                df = cargar_cubo_excel(archivo, tipo, excel_key_prefix, hoja=hoja_seleccionada)
                 if df is not None:
                     st.session_state[session_key] = df
                     _guardar_y_notificar(df, es_nuevo=True)
         else:
-            df = cargar_cubo_excel(archivo, tipo, excel_key_prefix)
+            df = cargar_cubo_excel(archivo, tipo, excel_key_prefix, hoja=hoja_seleccionada)
             if df is not None:
                 st.session_state[session_key] = df
                 _guardar_y_notificar(df, es_nuevo=False)
@@ -583,9 +612,11 @@ def pagina_dashboard():
     st.markdown("---")
 
     # -------------------------------------------------------------------------
-    # GRÁFICO DE ESTADO DE OC  +  TOP 10 PRODUCTOS (ÚLTIMO MES)
+    # GRÁFICO DE ESTADO DE OC  +  DETALLE POR ESTADO (click en torta)
     # -------------------------------------------------------------------------
     col_left, col_right = st.columns(2)
+
+    estado_sel = None  # estado elegido via pills
 
     with col_left:
         st.subheader("📊 Estado de OC")
@@ -602,10 +633,17 @@ def pagina_dashboard():
                 hole=0.4,
             )
             fig.update_traces(textposition="inside", textinfo="percent+label")
-            fig.update_layout(showlegend=True, height=380, margin=dict(t=20, b=10))
+            fig.update_layout(showlegend=True, height=360, margin=dict(t=20, b=10))
             st.plotly_chart(fig, use_container_width=True)
 
-            # Tabla explicativa de estados
+            # Pills de selección — pegadas al gráfico, reemplazan el click en torta
+            estado_sel = st.pills(
+                "Ver detalle:",
+                options=df_estados["estado_oc"].tolist(),
+                default=None,
+                key="pill_estado_oc",
+            )
+
             with st.expander("ℹ️ Significado de estados"):
                 st.markdown(
                     """
@@ -624,7 +662,49 @@ def pagina_dashboard():
             empty_state("📊", "Sin datos de requisiciones", "Carga el cubo de requisiciones para ver este gráfico")
 
     with col_right:
-        st.subheader("🏆 Top 10 Productos — Últimos 30 Días")
+        if estado_sel:
+            st.subheader(f"📋 {estado_sel}")
+            df_req_all = get_table("requisiciones")
+            df_det = df_req_all[df_req_all["estado_oc"] == estado_sel].copy()
+
+            cols_mostrar = [c for c in ["numreq", "desprod", "cantidad", "oc", "proveedor", "fecha_oc", "cant_recibida"] if c in df_det.columns]
+            df_det = df_det[cols_mostrar]
+
+            st.caption(f"{len(df_det)} línea(s) en este estado")
+            st.dataframe(
+                df_det,
+                use_container_width=True,
+                hide_index=True,
+                height=380,
+                column_config={
+                    "numreq":        st.column_config.TextColumn("N° REQ"),
+                    "desprod":       st.column_config.TextColumn("Descripción"),
+                    "cantidad":      st.column_config.NumberColumn("Cant.", format="%d"),
+                    "oc":            st.column_config.TextColumn("N° OC"),
+                    "proveedor":     st.column_config.TextColumn("Proveedor"),
+                    "fecha_oc":      st.column_config.DateColumn("Fecha OC", format="DD/MM/YYYY"),
+                    "cant_recibida": st.column_config.NumberColumn("Recibido", format="%d"),
+                },
+            )
+        else:
+            empty_state(
+                "👆",
+                "Selecciona un estado",
+                "Elige un estado del gráfico para ver las requisiciones de ese grupo",
+            )
+
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # TOP 10 PRODUCTOS (ÚLTIMO MES) — centrado bajo la torta
+    # -------------------------------------------------------------------------
+    _, col_top10, _ = st.columns([1, 4, 1])
+
+    with col_top10:
+        st.markdown(
+            "<h3 style='text-align:center; margin-bottom:4px'>🏆 Top 10 Productos — Últimos 30 Días</h3>",
+            unsafe_allow_html=True,
+        )
 
         df_productos = db.obtener_top_productos_ultimo_mes(10)
 
@@ -1608,19 +1688,7 @@ def pagina_seguimiento_oc():
                 # Resumen de resultados filtrados
                 st.markdown("---")
                 st.subheader("📊 Resumen de Resultados")
-                col_res1, col_res2, col_res3, col_res4 = st.columns(4)
-
-                with col_res1:
-                    st.metric("Total Líneas", len(df_compras))
-                with col_res2:
-                    total_solicitado = df_compras["Cant. Solicitada"].sum()
-                    st.metric("Cant. Solicitada Total", f"{total_solicitado:,.2f}")
-                with col_res3:
-                    total_recibido = df_compras["Total Recibido"].sum()
-                    st.metric("Cant. Recibida Total", f"{total_recibido:,.2f}")
-                with col_res4:
-                    valor_total_filtrado = df_compras["Total Línea"].sum()
-                    st.metric("Valor Total Filtrado", f"${valor_total_filtrado:,.0f}")
+                st.metric("Total Líneas", len(df_compras))
 
                 # Botón para descargar Excel
                 st.markdown("---")

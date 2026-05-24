@@ -42,6 +42,8 @@ AppKS/
 │   ├── config.py               # Constantes, rutas y configuración global
 │   ├── database.py             # Capa de acceso a datos (SQLite)
 │   ├── utils.py                # Validaciones y utilidades de carga Excel
+│   ├── cache.py                # Caché de lectura Excel por hash MD5
+│   ├── ui.py                   # Componentes visuales reutilizables (KPIs, CSS)
 │   │
 │   ├── modules/
 │   │   └── analisis_stock/
@@ -145,25 +147,21 @@ build.bat
 
 ## Estado actual
 
-**v1.8.4** – Sistema completo de gestión operativa
+**v1.9.1** – Interfaz rediseñada + Dashboard interactivo
 
+- Rediseño visual completo: sidebar con CSS injection, navegación con indicador de pestaña activa, componentes KPI reutilizables (`kpi_hero`, `kpi_card`, `empty_state`) en `app/ui.py`
+- Dashboard interactivo: click en estado del gráfico de torta (via pills) muestra tabla de requisiciones filtradas; Top 10 Productos reubicado y centrado bajo el gráfico
+- Selector de hoja Excel corregido: se muestra antes de la comparación de hash, funciona con archivos multi-hoja en todos los cubos
 - Arquitectura modular por servicios (UI / Services / DAL)
 - Carga idempotente con clave compuesta para requisiciones y compras
 - UPSERT inteligente con detección de cambios
-- Control de versión por hash MD5 en cubos de ventas e inventario
-- Sincronización automática REQ → OC: pure SQL, 3 pasos (proveedor de respaldo / match por observación / match automático), normalización de estados ERP mediante `_MAPA_ESTADO_ERP`
-- Módulo Análisis Stock: clasificación por estado de stock y rotación de productos
+- Sincronización automática REQ → OC: pure SQL, normalización de estados ERP con `_MAPA_ESTADO_ERP`
+- Módulo Análisis Stock: clasificación por estado de stock y rotación
 - Edición segura inline en 4 capas (UI → validación → backend → triggers SQL)
-- Estados de columna como TEXT con whitelist — elimina conflictos de tipo entre AG Grid, pandas y SQLite
-- `fecha_oc` normalizada a `YYYY-MM-DD` en toda escritura desde UI
-- Migraciones de esquema automáticas e idempotentes (cubre `requisiciones` y `compras`)
-- Persistencia robusta de datos entre navegaciones con rehidratación automática
-- Backup WAL-safe con checkpoint previo a la copia
-- Launcher `.exe` minimalista (~8 MB)
-- Validación de Excel two-pass en carga de requisiciones: rechazo total ante errores de columnas, tipos o duplicados `(NumReq, CodProd)` — ningún registro se inserta si el archivo tiene errores
-- Carga atómica de requisiciones: FASE 1 valida todo, FASE 2 inserta en una sola transacción con rollback automático
+- Validación two-pass de Excel con rechazo total y transacción atómica
 - Servicio `check_consistencia.py` con 4 checks de integridad REQ↔OC
-- Tab "🔍 Diagnóstico" en ⚙️ Configuración (solo lectura)
+- Migraciones automáticas e idempotentes al arrancar
+- Launcher `.exe` minimalista (~8 MB)
 
 ---
 

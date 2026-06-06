@@ -1413,8 +1413,7 @@ def tabla_listado_requisiciones():
                         with st.expander("📋 Ver detalles de las operaciones"):
                             for mensaje in resultado["mensajes"]:
                                 st.text(mensaje)
-                    st.balloons()
-                    time.sleep(2.5)
+                    time.sleep(10)
                     st.rerun()
                 else:
                     st.error("❌ No se pudo guardar ningún cambio")

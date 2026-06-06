@@ -702,7 +702,7 @@ def pagina_dashboard():
 
     with col_top10:
         st.markdown(
-            "<h3 style='text-align:center; margin-bottom:4px'>🏆 Top 10 Productos — Últimos 30 Días</h3>",
+            "<h3 style='text-align:center; margin-bottom:4px'>🏆 Top 10 Productos — Últimos 60 Días</h3>",
             unsafe_allow_html=True,
         )
 

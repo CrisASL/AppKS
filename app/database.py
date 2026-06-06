@@ -1098,7 +1098,7 @@ def obtener_top_productos_ultimo_mes(limite: int = 10) -> pd.DataFrame:
     try:
         from datetime import datetime, timedelta
 
-        fecha_corte = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        fecha_corte = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
 
         df = get_table("requisiciones").copy()
         if df.empty:

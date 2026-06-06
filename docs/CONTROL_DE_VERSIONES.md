@@ -849,16 +849,34 @@ Corregir el selector de hojas Excel y agregar drill-down interactivo al dashboar
 
 ---
 
+## 🔹 v1.9.2 – Ajuste ventana Top 10 Productos
+
+### 🎯 Objetivo
+Ampliar el periodo de análisis del gráfico Top 10 Productos de 30 a 60 días para capturar mejor la tendencia de demanda.
+
+### 🏗️ Implementado
+
+#### `app/database.py` — `obtener_top_productos_ultimo_mes()`
+- `timedelta(days=30)` → `timedelta(days=60)`
+
+#### `app/main.py` — título del gráfico
+- "Últimos 30 Días" → "Últimos 60 Días"
+
+### 📈 Resultado
+✅ Top 10 ahora refleja 60 días corridos — mayor representatividad estadística
+
+---
+
 # 📍 Versión Actual
 
-**v1.9.1** — Mayo 2026
+**v1.9.2** — Junio 2026
 
 | Área | Estado |
 |---|---|
 | Gestión de Requisiciones | ✅ Operativo — edición inline, validación two-pass, carga atómica |
 | Seguimiento OC | ✅ Operativo — UPSERT inteligente, sync REQ→OC pure SQL |
 | Análisis Stock | ✅ Operativo — clasificación por stock y rotación |
-| Dashboard | ✅ Operativo — KPIs, torta interactiva, Top 10 |
+| Dashboard | ✅ Operativo — KPIs, torta interactiva, Top 10 (60 días) |
 | Configuración / Diagnóstico | ✅ Operativo — 4 checks REQ↔OC, limpieza granular, backup WAL-safe |
 | Interfaz | ✅ Rediseñada — CSS injection, sidebar jerarquizado, componentes KPI |
 | Empaquetado | ✅ Launcher `.exe` ~8 MB |

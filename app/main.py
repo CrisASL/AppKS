@@ -5,6 +5,7 @@ Autor: Cristian Salas
 """
 
 import hashlib
+import time
 
 import streamlit as st
 import pandas as pd
@@ -1233,10 +1234,12 @@ def tabla_listado_requisiciones():
     with _col_mark:
         if st.button("✅ Marcar todos como enviados", use_container_width=True):
             st.session_state.estado_envio_override = "Enviado"
+            st.session_state.estado_envio_bulk_pending = "Enviado"
             st.rerun()
     with _col_unmark:
         if st.button("↩ Marcar todos como no enviados", use_container_width=True):
             st.session_state.estado_envio_override = "No Enviado"
+            st.session_state.estado_envio_bulk_pending = "No Enviado"
             st.rerun()
 
     st.info(
@@ -1348,16 +1351,26 @@ def tabla_listado_requisiciones():
         )
 
     # Construir df_editado alineando por 'id'.
-    # Bug anterior: df_preparado tiene índice entero (0,1,2...) y
-    # df_editado_grid.set_index("id") tiene IDs reales → update() no alineaba nada.
+    # IMPORTANTE: no usar df.update() porque ignora silenciosamente NaN en el
+    # DataFrame fuente — exactamente lo que AG Grid devuelve cuando el usuario
+    # borra el contenido de una celda (null → NaN en pandas).
+    # Se usa asignación directa con .loc para preservar NaN y permitir borrar campos.
     _cols_edit = [
         c for c in df_editado_grid.columns
         if c in df_preparado.columns and c != "id"
     ]
     df_editado = df_preparado.set_index("id").copy()
     if _cols_edit and "id" in df_editado_grid.columns:
-        df_editado.update(df_editado_grid.set_index("id")[_cols_edit])
+        df_grid_indexed = df_editado_grid.set_index("id")[_cols_edit]
+        common_ids = df_editado.index.intersection(df_grid_indexed.index)
+        df_editado.loc[common_ids, _cols_edit] = df_grid_indexed.loc[common_ids, _cols_edit]
     df_editado = df_editado.reset_index()
+
+    # Aplicar bulk override pendiente (marcar todos como enviados / no enviados).
+    # Necesario porque el override visual (estado_envio_override) se limpia tras
+    # renderizar el grid, por lo que en el rerun de "Guardar" ya no existe.
+    if st.session_state.get("estado_envio_bulk_pending") is not None:
+        df_editado["estado_envio"] = st.session_state.estado_envio_bulk_pending
 
     st.markdown("---")
 
@@ -1395,11 +1408,13 @@ def tabla_listado_requisiciones():
                             f"ℹ️ {resultado['sin_cambios']} requisiciones sin cambios"
                         )
                     st.session_state.df_req_original = df_editado.copy()
+                    st.session_state.estado_envio_bulk_pending = None
                     if resultado["mensajes"]:
                         with st.expander("📋 Ver detalles de las operaciones"):
                             for mensaje in resultado["mensajes"]:
                                 st.text(mensaje)
                     st.balloons()
+                    time.sleep(2.5)
                     st.rerun()
                 else:
                     st.error("❌ No se pudo guardar ningún cambio")
@@ -1415,11 +1430,13 @@ def tabla_listado_requisiciones():
     with col2:
         if st.button("🔄 Recargar Datos", use_container_width=True):
             st.session_state.reload_req_data = True
+            st.session_state.estado_envio_bulk_pending = None
             st.rerun()
 
     with col3:
         if st.button("❌ Descartar Cambios", use_container_width=True):
             st.session_state.df_req_original = df_preparado.copy()
+            st.session_state.estado_envio_bulk_pending = None
             st.success("Cambios descartados")
             st.rerun()
 
